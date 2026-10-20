@@ -36,10 +36,14 @@ The shared (modality-invariant) branch can be aligned with one of two losses, se
 
 | Argument | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `--shared_align_loss` | `cmd`, `atp` | `cmd` | Shared alignment loss. `cmd` is the original MISA correlation-matrix alignment; `atp` is symmetric all-pair alignment (ATP-all). |
+| `--shared_align_loss` | `cmd`, `atp` | `cmd` | Shared alignment loss. `cmd` is the original MISA correlation-matrix alignment; `atp` aligns unit-normalized shared representations. |
+| `--atp_variant` | `text`, `all` | `all` | ATP variant: `text` anchors audio/video to text; `all` aligns all three pairs. |
 | `--sim_weight` | float | `1.0` | Weight of the selected shared alignment loss. |
 
-**ATP (ATP-all)** (`--shared_align_loss atp`) symmetrically aligns all three modality pairs — text-audio, text-video, and audio-video — by minimizing their mean squared distance on unit-normalized shared vectors. The three pair losses are averaged with equal weight.
+**ATP** (`--shared_align_loss atp`) minimizes the mean squared distance between unit-normalized shared representations. The `--atp_variant` switch selects the alignment target:
+
+- `text` — anchors audio and video to text, aligning only the text-audio and text-video pairs.
+- `all` (default) — symmetrically aligns all three pairs (text-audio, text-video, audio-video), averaged with equal weight.
 
 Notes:
 
