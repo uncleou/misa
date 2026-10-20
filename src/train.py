@@ -10,9 +10,17 @@ from solver import Solver
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import torch.distributed as dist
 
 
 if __name__ == '__main__':
+
+    world_size = int(os.environ.get('WORLD_SIZE', '1'))
+    distributed = world_size > 1
+    if distributed:
+        local_rank = int(os.environ['LOCAL_RANK'])
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend='nccl', init_method='env://')
     
     # Setting random seed
     random_name = str(random())
@@ -27,6 +35,9 @@ if __name__ == '__main__':
     train_config = get_config(mode='train')
     dev_config = get_config(mode='dev')
     test_config = get_config(mode='test')
+
+    if distributed:
+        train_config.batch_size = max(1, train_config.batch_size // world_size)
 
     print(train_config)
 
@@ -44,4 +55,8 @@ if __name__ == '__main__':
     solver.build()
 
     # Train the model (test scores will be returned based on dev performance)
-    solver.train()
+    try:
+        solver.train()
+    finally:
+        if distributed:
+            dist.destroy_process_group()

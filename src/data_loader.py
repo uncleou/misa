@@ -6,7 +6,7 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from transformers import BertTokenizer
 
 from create_dataset import MOSI, MOSEI, UR_FUNNY, PAD, UNK
@@ -97,10 +97,18 @@ def get_loader(config, shuffle=True):
         return sentences, visual, acoustic, labels, lengths, bert_sentences, bert_sentence_types, bert_sentence_att_mask
 
 
+    distributed_train = (
+        torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+        and config.mode == 'train'
+    )
+    sampler = DistributedSampler(dataset, shuffle=shuffle) if distributed_train else None
+
     data_loader = DataLoader(
         dataset=dataset,
         batch_size=config.batch_size,
-        shuffle=shuffle,
+        shuffle=shuffle if sampler is None else False,
+        sampler=sampler,
         collate_fn=collate_fn)
 
     return data_loader

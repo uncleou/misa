@@ -90,15 +90,14 @@ class CMD(nn.Module):
         dm = self.matchnorm(mx1, mx2)
         scms = dm
         for i in range(n_moments - 1):
-            scms += self.scm(sx1, sx2, i + 2)
+            # Non-in-place: linalg.vector_norm saves its output for backward.
+            scms = scms + self.scm(sx1, sx2, i + 2)
         return scms
 
     def matchnorm(self, x1, x2):
-        power = torch.pow(x1-x2,2)
-        summed = torch.sum(power)
-        sqrt = summed**(0.5)
-        return sqrt
-        # return ((x1-x2)**2).sum().sqrt()
+        # L2 norm; linalg.vector_norm has a finite (zero) gradient at 0,
+        # unlike summed ** 0.5 which yields NaN when both means coincide.
+        return torch.linalg.vector_norm(x1 - x2)
 
     def scm(self, sx1, sx2, k):
         ss1 = torch.mean(torch.pow(sx1, k), 0)

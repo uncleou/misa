@@ -3,6 +3,7 @@ import math
 from math import isnan
 import re
 import pickle
+from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 from tqdm import tqdm_notebook
@@ -31,12 +32,16 @@ class Solver(object):
         self.test_data_loader = test_data_loader
         self.is_train = is_train
         self.model = model
+        self.parallel_model = model
+        self.checkpoint_dir = Path(__file__).resolve().parent.parent / 'checkpoints'
     
     @time_desc_decorator('Build Graph')
     def build(self, cuda=True):
 
         if self.model is None:
             self.model = getattr(models, self.train_config.model)(self.train_config)
+        if self.parallel_model is None:
+            self.parallel_model = self.model
         
         # Final list
         for name, param in self.model.named_parameters():
@@ -64,6 +69,11 @@ class Solver(object):
         if torch.cuda.is_available() and cuda:
             self.model.cuda()
 
+        if self.train_config.data == "ur_funny":
+            self.criterion = nn.CrossEntropyLoss(reduction="mean")
+        else:  # mosi and mosei are regression datasets
+            self.criterion = nn.MSELoss(reduction="mean")
+
         if self.is_train:
             self.optimizer = self.train_config.optimizer(
                 filter(lambda p: p.requires_grad, self.model.parameters()),
@@ -74,6 +84,14 @@ class Solver(object):
     def train(self):
         curr_patience = patience = self.train_config.patience
         num_trials = 1
+
+        distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+        if distributed:
+            # Ensure every rank starts from identical parameters/buffers.
+            for param in self.model.parameters():
+                torch.distributed.broadcast(param.data, src=0)
+            for buffer in self.model.buffers():
+                torch.distributed.broadcast(buffer.data, src=0)
 
         # self.criterion = criterion = nn.L1Loss(reduction="mean")
         if self.train_config.data == "ur_funny":
@@ -99,6 +117,8 @@ class Solver(object):
         train_losses = []
         valid_losses = []
         for e in range(self.train_config.n_epoch):
+            if hasattr(self.train_data_loader.sampler, 'set_epoch'):
+                self.train_data_loader.sampler.set_epoch(e)
             self.model.train()
 
             train_loss_cls, train_loss_sim, train_loss_diff = [], [], []
@@ -120,7 +140,7 @@ class Solver(object):
                 bert_sent_type = to_gpu(bert_sent_type)
                 bert_sent_mask = to_gpu(bert_sent_mask)
 
-                y_tilde = self.model(t, v, a, l, bert_sent, bert_sent_type, bert_sent_mask)
+                y_tilde = self.parallel_model(t, v, a, l, bert_sent, bert_sent_type, bert_sent_mask)
                 
                 if self.train_config.data == "ur_funny":
                     y = y.squeeze()
@@ -138,7 +158,16 @@ class Solver(object):
                     self.train_config.recon_weight * recon_loss
 
                 loss.backward()
-                
+
+                if distributed:
+                    # Average local gradients across ranks (equivalent to DDP).
+                    world_size = torch.distributed.get_world_size()
+                    for param in self.model.parameters():
+                        if param.grad is not None:
+                            torch.distributed.all_reduce(
+                                param.grad, op=torch.distributed.ReduceOp.SUM)
+                            param.grad.div_(world_size)
+
                 torch.nn.utils.clip_grad_value_([param for param in self.model.parameters() if param.requires_grad], self.train_config.clip)
                 self.optimizer.step()
 
@@ -174,9 +203,10 @@ class Solver(object):
             if valid_loss <= best_valid_loss:
                 best_valid_loss = valid_loss
                 print("Found new best model on dev set!")
-                if not os.path.exists('checkpoints'): os.makedirs('checkpoints')
-                torch.save(self.model.state_dict(), f'checkpoints/model_{self.train_config.name}.std')
-                torch.save(self.optimizer.state_dict(), f'checkpoints/optim_{self.train_config.name}.std')
+                if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                    self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                    torch.save(self.model.state_dict(), self.checkpoint_dir / f'model_{self.train_config.name}.std')
+                    torch.save(self.optimizer.state_dict(), self.checkpoint_dir / f'optim_{self.train_config.name}.std')
                 curr_patience = patience
             else:
                 curr_patience -= 1
@@ -184,8 +214,8 @@ class Solver(object):
                     print("Running out of patience, loading previous best model.")
                     num_trials -= 1
                     curr_patience = patience
-                    self.model.load_state_dict(torch.load(f'checkpoints/model_{self.train_config.name}.std'))
-                    self.optimizer.load_state_dict(torch.load(f'checkpoints/optim_{self.train_config.name}.std'))
+                    self.model.load_state_dict(torch.load(self.checkpoint_dir / f'model_{self.train_config.name}.std'))
+                    self.optimizer.load_state_dict(torch.load(self.checkpoint_dir / f'optim_{self.train_config.name}.std'))
                     lr_scheduler.step()
                     print(f"Current learning rate: {self.optimizer.state_dict()['param_groups'][0]['lr']}")
             
@@ -212,7 +242,7 @@ class Solver(object):
 
             if to_print:
                 self.model.load_state_dict(torch.load(
-                    f'checkpoints/model_{self.train_config.name}.std'))
+                    self.checkpoint_dir / f'model_{self.train_config.name}.std'))
             
 
         with torch.no_grad():
@@ -230,7 +260,7 @@ class Solver(object):
                 bert_sent_type = to_gpu(bert_sent_type)
                 bert_sent_mask = to_gpu(bert_sent_mask)
 
-                y_tilde = self.model(t, v, a, l, bert_sent, bert_sent_type, bert_sent_mask)
+                y_tilde = self.parallel_model(t, v, a, l, bert_sent, bert_sent_type, bert_sent_mask)
 
                 if self.train_config.data == "ur_funny":
                     y = y.squeeze()
