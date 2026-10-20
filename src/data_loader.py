@@ -102,7 +102,10 @@ def get_loader(config, shuffle=True):
         and torch.distributed.is_initialized()
         and config.mode == 'train'
     )
-    sampler = DistributedSampler(dataset, shuffle=shuffle) if distributed_train else None
+    sampler = (
+        DistributedSampler(dataset, shuffle=shuffle, seed=config.seed)
+        if distributed_train else None
+    )
 
     data_loader = DataLoader(
         dataset=dataset,
