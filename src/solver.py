@@ -110,7 +110,7 @@ class Solver(object):
             if self.train_config.use_cmd_sim else 'domain'
         )
         if alignment_name == 'atp':
-            alignment_name = 'atp-all'
+            alignment_name = f'atp-{self.train_config.atp_variant}'
         print(f"Shared alignment: {alignment_name}, weight={self.train_config.sim_weight}")
         
         best_valid_loss = float('inf')
@@ -151,7 +151,7 @@ class Solver(object):
                 diff_loss = self.get_diff_loss()
                 recon_loss = self.get_recon_loss()
                 similarity_loss = self.get_similarity_loss()
-                if alignment_name == 'atp-all':
+                if alignment_name.startswith('atp'):
                     alignment_stats.append(self.get_shared_alignment_stats())
                 
                 loss = cls_loss + \
@@ -210,6 +210,8 @@ class Solver(object):
                     self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
                     torch.save(self.model.state_dict(), self.checkpoint_dir / f'model_{self.train_config.name}.std')
                     torch.save(self.optimizer.state_dict(), self.checkpoint_dir / f'optim_{self.train_config.name}.std')
+                if torch.distributed.is_initialized():
+                    torch.distributed.barrier()
                 curr_patience = patience
             else:
                 curr_patience -= 1
@@ -226,6 +228,8 @@ class Solver(object):
                 print("Running out of patience, early stopping.")
                 break
 
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
         self.eval(mode="test", to_print=True)
 
 
@@ -383,16 +387,19 @@ class Solver(object):
         return self.get_cmd_loss()
 
     def get_atp_loss(self):
-        """ATP-all: average squared distance over all three unit-vector pairs.
+        """ATP alignment between unit-normalized shared representations.
 
-        Normalize local tensors only: fusion, reconstruction and DiffLoss keep
-        the original shared states. All three modalities receive gradients.
+        'text' anchors audio and video to text; 'all' averages over the three
+        modality pairs. Normalize local tensors only: fusion, reconstruction
+        and DiffLoss keep the original shared states.
         """
         shared_t = F.normalize(self.model.utt_shared_t, p=2, dim=-1, eps=1e-8)
         shared_a = F.normalize(self.model.utt_shared_a, p=2, dim=-1, eps=1e-8)
         shared_v = F.normalize(self.model.utt_shared_v, p=2, dim=-1, eps=1e-8)
         loss_ta = (shared_t - shared_a).square().sum(dim=-1).mean()
         loss_tv = (shared_t - shared_v).square().sum(dim=-1).mean()
+        if self.train_config.atp_variant == 'text':
+            return (loss_ta + loss_tv) / 2.0
         loss_av = (shared_a - shared_v).square().sum(dim=-1).mean()
         return (loss_ta + loss_tv + loss_av) / 3.0
 

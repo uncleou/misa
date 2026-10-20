@@ -1,7 +1,7 @@
 import os
 import pickle
+import random
 import numpy as np
-from random import random
 
 from config import get_config, activation_dict
 from data_loader import get_loader
@@ -22,19 +22,19 @@ if __name__ == '__main__':
         torch.cuda.set_device(local_rank)
         dist.init_process_group(backend='nccl', init_method='env://')
     
+    # Setting the config for each stage
+    train_config = get_config(mode='train')
+    dev_config = get_config(mode='dev')
+    test_config = get_config(mode='test')
+
     # Setting random seed
-    random_name = str(random())
-    random_seed = 336   
+    random_seed = train_config.seed
+    random.seed(random_seed)
     torch.manual_seed(random_seed)
     torch.cuda.manual_seed_all(random_seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     np.random.seed(random_seed)
-    
-    # Setting the config for each stage
-    train_config = get_config(mode='train')
-    dev_config = get_config(mode='dev')
-    test_config = get_config(mode='test')
 
     if distributed:
         train_config.batch_size = max(1, train_config.batch_size // world_size)
