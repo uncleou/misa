@@ -89,7 +89,7 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--use_cmd_sim', type=str2bool, default=True)
     parser.add_argument(
         '--shared_align_loss', choices=('cmd', 'atp'), default='cmd',
-        help='Shared alignment loss when use_cmd_sim=true; ATP uses text as anchor.'
+        help='Shared alignment loss when use_cmd_sim=true; ATP symmetrically aligns all three modality pairs (ATP-all).'
     )
 
     # Train

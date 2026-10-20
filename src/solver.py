@@ -109,6 +109,8 @@ class Solver(object):
             self.train_config.shared_align_loss
             if self.train_config.use_cmd_sim else 'domain'
         )
+        if alignment_name == 'atp':
+            alignment_name = 'atp-all'
         print(f"Shared alignment: {alignment_name}, weight={self.train_config.sim_weight}")
         
         best_valid_loss = float('inf')
@@ -149,7 +151,7 @@ class Solver(object):
                 diff_loss = self.get_diff_loss()
                 recon_loss = self.get_recon_loss()
                 similarity_loss = self.get_similarity_loss()
-                if alignment_name == 'atp':
+                if alignment_name == 'atp-all':
                     alignment_stats.append(self.get_shared_alignment_stats())
                 
                 loss = cls_loss + \
@@ -192,9 +194,10 @@ class Solver(object):
                 print(
                     f"Shared alignment batch means: cos_ta={mean_stats[0]:.6f}, "
                     f"cos_tv={mean_stats[1]:.6f}, "
-                    f"normalized_var_t={mean_stats[2]:.6e}, "
-                    f"normalized_var_a={mean_stats[3]:.6e}, "
-                    f"normalized_var_v={mean_stats[4]:.6e}"
+                    f"cos_av={mean_stats[2]:.6f}, "
+                    f"normalized_var_t={mean_stats[3]:.6e}, "
+                    f"normalized_var_a={mean_stats[4]:.6e}, "
+                    f"normalized_var_v={mean_stats[5]:.6e}"
                 )
 
             valid_loss, valid_acc = self.eval(mode="dev")
@@ -380,7 +383,7 @@ class Solver(object):
         return self.get_cmd_loss()
 
     def get_atp_loss(self):
-        """Mean squared distance to the text anchor on unit shared vectors.
+        """ATP-all: average squared distance over all three unit-vector pairs.
 
         Normalize local tensors only: fusion, reconstruction and DiffLoss keep
         the original shared states. All three modalities receive gradients.
@@ -390,7 +393,8 @@ class Solver(object):
         shared_v = F.normalize(self.model.utt_shared_v, p=2, dim=-1, eps=1e-8)
         loss_ta = (shared_t - shared_a).square().sum(dim=-1).mean()
         loss_tv = (shared_t - shared_v).square().sum(dim=-1).mean()
-        return (loss_ta + loss_tv) / 2.0
+        loss_av = (shared_a - shared_v).square().sum(dim=-1).mean()
+        return (loss_ta + loss_tv + loss_av) / 3.0
 
     @torch.no_grad()
     def get_shared_alignment_stats(self):
@@ -401,6 +405,7 @@ class Solver(object):
         return (
             (shared_t * shared_a).sum(dim=-1).mean().item(),
             (shared_t * shared_v).sum(dim=-1).mean().item(),
+            (shared_a * shared_v).sum(dim=-1).mean().item(),
             shared_t.var(dim=0, unbiased=False).mean().item(),
             shared_a.var(dim=0, unbiased=False).mean().item(),
             shared_v.var(dim=0, unbiased=False).mean().item(),
