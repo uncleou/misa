@@ -1,0 +1,31 @@
+checkpoint: checkpoints/model_mosi_cmd_4x4090.std
+dataset: mosi
+shared_align_loss: cmd
+eval_loss: 1.027930
+accuracy: 0.813411
+
+mae:  0.75668555
+corr:  0.7841388002997285
+mult_acc:  0.44314868804664725
+Classification Report (pos/neg) :
+              precision    recall  f1-score   support
+
+       False    0.85052   0.87071   0.86050       379
+        True    0.81716   0.79061   0.80367       277
+
+    accuracy                        0.83689       656
+   macro avg    0.83384   0.83066   0.83208       656
+weighted avg    0.83643   0.83689   0.83650       656
+
+Accuracy (pos/neg)  0.836890243902439
+Classification Report (non-neg/neg) :
+              precision    recall  f1-score   support
+
+       False    0.80685   0.87071   0.83756       379
+        True    0.82310   0.74267   0.78082       307
+
+    accuracy                        0.81341       686
+   macro avg    0.81498   0.80669   0.80919       686
+weighted avg    0.81412   0.81341   0.81217       686
+
+Accuracy (non-neg/neg)  0.8134110787172012

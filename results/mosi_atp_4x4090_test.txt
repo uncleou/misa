@@ -1,0 +1,31 @@
+checkpoint: checkpoints/model_mosi_atp_4x4090.std
+dataset: mosi
+shared_align_loss: atp
+eval_loss: 1.117657
+accuracy: 0.813411
+
+mae:  0.7985648
+corr:  0.7731082276805178
+mult_acc:  0.40524781341107874
+Classification Report (pos/neg) :
+              precision    recall  f1-score   support
+
+       False    0.88696   0.80739   0.84530       379
+        True    0.76527   0.85921   0.80952       277
+
+    accuracy                        0.82927       656
+   macro avg    0.82611   0.83330   0.82741       656
+weighted avg    0.83558   0.82927   0.83020       656
+
+Accuracy (pos/neg)  0.8292682926829268
+Classification Report (non-neg/neg) :
+              precision    recall  f1-score   support
+
+       False    0.84765   0.80739   0.82703       379
+        True    0.77538   0.82085   0.79747       307
+
+    accuracy                        0.81341       686
+   macro avg    0.81152   0.81412   0.81225       686
+weighted avg    0.81531   0.81341   0.81380       686
+
+Accuracy (non-neg/neg)  0.8134110787172012
