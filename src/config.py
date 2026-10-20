@@ -46,6 +46,14 @@ class Config(object):
                     value = activation_dict[value]
                 setattr(self, key, value)
 
+        self.shared_align_loss = getattr(self, 'shared_align_loss', 'cmd')
+        if self.shared_align_loss not in ('cmd', 'atp'):
+            raise ValueError("shared_align_loss must be 'cmd' or 'atp'")
+        if self.shared_align_loss == 'atp' and not self.use_cmd_sim:
+            raise ValueError(
+                "ATP requires --use_cmd_sim true; false enables domain-adversarial alignment."
+            )
+
         # Dataset directory: ex) ./datasets/cornell/
         self.dataset_dir = data_dict[self.data.lower()]
         self.sdk_dir = sdk_dir
@@ -79,6 +87,10 @@ def get_config(parse=True, **optional_kwargs):
     # Bert
     parser.add_argument('--use_bert', type=str2bool, default=True)
     parser.add_argument('--use_cmd_sim', type=str2bool, default=True)
+    parser.add_argument(
+        '--shared_align_loss', choices=('cmd', 'atp'), default='cmd',
+        help='Shared alignment loss when use_cmd_sim=true; ATP uses text as anchor.'
+    )
 
     # Train
     time_now = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
@@ -90,7 +102,8 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--patience', type=int, default=6)
 
     parser.add_argument('--diff_weight', type=float, default=0.3)
-    parser.add_argument('--sim_weight', type=float, default=1.0)
+    parser.add_argument('--sim_weight', type=float, default=1.0,
+                        help='Weight of the selected shared alignment loss.')
     parser.add_argument('--sp_weight', type=float, default=0.0)
     parser.add_argument('--recon_weight', type=float, default=1.0)
 

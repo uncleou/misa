@@ -87,6 +87,11 @@ class Solver(object):
         self.loss_diff = DiffLoss()
         self.loss_recon = MSE()
         self.loss_cmd = CMD()
+        alignment_name = (
+            self.train_config.shared_align_loss
+            if self.train_config.use_cmd_sim else 'domain'
+        )
+        print(f"Shared alignment: {alignment_name}, weight={self.train_config.sim_weight}")
         
         best_valid_loss = float('inf')
         lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.5)
@@ -100,6 +105,7 @@ class Solver(object):
             train_loss_recon = []
             train_loss_sp = []
             train_loss = []
+            alignment_stats = []
             for batch in self.train_data_loader:
                 self.model.zero_grad()
                 t, v, a, y, l, bert_sent, bert_sent_type, bert_sent_mask = batch
@@ -121,14 +127,10 @@ class Solver(object):
 
                 cls_loss = criterion(y_tilde, y)
                 diff_loss = self.get_diff_loss()
-                domain_loss = self.get_domain_loss()
                 recon_loss = self.get_recon_loss()
-                cmd_loss = self.get_cmd_loss()
-                
-                if self.train_config.use_cmd_sim:
-                    similarity_loss = cmd_loss
-                else:
-                    similarity_loss = domain_loss
+                similarity_loss = self.get_similarity_loss()
+                if alignment_name == 'atp':
+                    alignment_stats.append(self.get_shared_alignment_stats())
                 
                 loss = cls_loss + \
                     self.train_config.diff_weight * diff_loss + \
@@ -149,6 +151,22 @@ class Solver(object):
 
             train_losses.append(train_loss)
             print(f"Training loss: {round(np.mean(train_loss), 4)}")
+
+            mean_alignment_loss = np.mean(train_loss_sim)
+            print(
+                f"Alignment loss ({alignment_name}): {mean_alignment_loss:.6f}, "
+                f"weighted: {self.train_config.sim_weight * mean_alignment_loss:.6f}"
+            )
+            if alignment_stats:
+                # Diagnostic batch means; these are not full-dataset variances.
+                mean_stats = np.mean(alignment_stats, axis=0)
+                print(
+                    f"Shared alignment batch means: cos_ta={mean_stats[0]:.6f}, "
+                    f"cos_tv={mean_stats[1]:.6f}, "
+                    f"normalized_var_t={mean_stats[2]:.6e}, "
+                    f"normalized_var_a={mean_stats[3]:.6e}, "
+                    f"normalized_var_v={mean_stats[4]:.6e}"
+                )
 
             valid_loss, valid_acc = self.eval(mode="dev")
             
@@ -323,6 +341,40 @@ class Solver(object):
         domain_true = torch.cat((domain_true_t, domain_true_v, domain_true_a), dim=0)
 
         return self.domain_loss_criterion(domain_pred, domain_true)
+
+    def get_similarity_loss(self):
+        if not self.train_config.use_cmd_sim:
+            return self.get_domain_loss()
+        if self.train_config.shared_align_loss == 'atp':
+            return self.get_atp_loss()
+        return self.get_cmd_loss()
+
+    def get_atp_loss(self):
+        """Mean squared distance to the text anchor on unit shared vectors.
+
+        Normalize local tensors only: fusion, reconstruction and DiffLoss keep
+        the original shared states. All three modalities receive gradients.
+        """
+        shared_t = F.normalize(self.model.utt_shared_t, p=2, dim=-1, eps=1e-8)
+        shared_a = F.normalize(self.model.utt_shared_a, p=2, dim=-1, eps=1e-8)
+        shared_v = F.normalize(self.model.utt_shared_v, p=2, dim=-1, eps=1e-8)
+        loss_ta = (shared_t - shared_a).square().sum(dim=-1).mean()
+        loss_tv = (shared_t - shared_v).square().sum(dim=-1).mean()
+        return (loss_ta + loss_tv) / 2.0
+
+    @torch.no_grad()
+    def get_shared_alignment_stats(self):
+        """Pair cosines and mean per-dimension variance within this batch."""
+        shared_t = F.normalize(self.model.utt_shared_t, p=2, dim=-1, eps=1e-8)
+        shared_a = F.normalize(self.model.utt_shared_a, p=2, dim=-1, eps=1e-8)
+        shared_v = F.normalize(self.model.utt_shared_v, p=2, dim=-1, eps=1e-8)
+        return (
+            (shared_t * shared_a).sum(dim=-1).mean().item(),
+            (shared_t * shared_v).sum(dim=-1).mean().item(),
+            shared_t.var(dim=0, unbiased=False).mean().item(),
+            shared_a.var(dim=0, unbiased=False).mean().item(),
+            shared_v.var(dim=0, unbiased=False).mean().item(),
+        )
 
     def get_cmd_loss(self,):
 
