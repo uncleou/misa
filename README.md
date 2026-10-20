@@ -30,6 +30,22 @@ conda activate misa-code
 3. Set ```sdk_dir``` to the path of CMU-MultimodalSDK.
 2. ```python train.py --data mosi```. Replace ```mosi``` with ```mosei``` or ```ur_funny``` for other datasets.
 
+### Shared Alignment Loss (extension)
+
+The shared (modality-invariant) branch can be aligned with one of two losses, selected via `--shared_align_loss`:
+
+| Argument | Values | Default | Description |
+|----------|--------|---------|-------------|
+| `--shared_align_loss` | `cmd`, `atp` | `cmd` | Shared alignment loss. `cmd` is the original MISA correlation-matrix alignment; `atp` is text-anchored alignment. |
+| `--sim_weight` | float | `1.0` | Weight of the selected shared alignment loss. |
+
+**Text-anchored ATP** (`--shared_align_loss atp`) treats the *text* shared representation as an anchor and pulls the audio and video shared representations toward it, minimizing their mean squared distance on unit-normalized vectors. This is meant to force cross-modal alignment onto the text modality.
+
+Notes:
+
+- `atp` requires `--use_cmd_sim true` (the default). With `--use_cmd_sim false`, alignment falls back to a domain-adversarial loss regardless of `--shared_align_loss`.
+- The remaining losses (classification, DiffLoss, reconstruction) are unchanged, so only the shared-alignment term is swapped.
+
 ### Citation
 
 If this paper is useful for your research, please cite us at:
