@@ -1,5 +1,6 @@
 import os
 import argparse
+import math
 from datetime import datetime
 from collections import defaultdict
 from datetime import datetime
@@ -53,6 +54,13 @@ class Config(object):
             raise ValueError(
                 "ATP requires --use_cmd_sim true; false enables domain-adversarial alignment."
             )
+
+        self.cu_weight = getattr(self, 'cu_weight', 0.0)
+        self.cu_tau = getattr(self, 'cu_tau', 2.0)
+        if not math.isfinite(self.cu_weight) or self.cu_weight < 0:
+            raise ValueError('cu_weight must be finite and non-negative')
+        if not math.isfinite(self.cu_tau) or self.cu_tau <= 0:
+            raise ValueError('cu_tau must be finite and positive')
 
         # Dataset directory: ex) ./datasets/cornell/
         self.dataset_dir = data_dict[self.data.lower()]
@@ -109,6 +117,10 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--diff_weight', type=float, default=0.3)
     parser.add_argument('--sim_weight', type=float, default=1.0,
                         help='Weight of the selected shared alignment loss.')
+    parser.add_argument('--cu_weight', type=float, default=0.0,
+                        help='Centroid uniformity weight; 0 preserves the existing loss.')
+    parser.add_argument('--cu_tau', type=float, default=2.0,
+                        help='Positive scale in exp(-cu_tau * squared centroid distance).')
     parser.add_argument('--sp_weight', type=float, default=0.0)
     parser.add_argument('--recon_weight', type=float, default=1.0)
 

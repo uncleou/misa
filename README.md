@@ -36,9 +36,11 @@ The shared (modality-invariant) branch can be aligned with one of two losses, se
 
 | Argument | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `--shared_align_loss` | `cmd`, `atp` | `cmd` | Shared alignment loss. `cmd` is the original MISA correlation-matrix alignment; `atp` aligns unit-normalized shared representations. |
+| `--shared_align_loss` | `cmd`, `atp` | `cmd` | Shared alignment loss. `cmd` is the original MISA Central Moment Discrepancy; `atp` aligns unit-normalized shared representations. |
 | `--atp_variant` | `text`, `all` | `all` | ATP variant: `text` anchors audio/video to text; `all` aligns all three pairs. |
 | `--sim_weight` | float | `1.0` | Weight of the selected shared alignment loss. |
+| `--cu_weight` | non-negative float | `0.0` | Sample-centroid uniformity weight. Zero disables CU and preserves existing versions. |
+| `--cu_tau` | positive float | `2.0` | Distance scale in the uniformity exponential. |
 
 **ATP** (`--shared_align_loss atp`) minimizes the mean squared distance between unit-normalized shared representations. The `--atp_variant` switch selects the alignment target:
 
@@ -47,8 +49,71 @@ The shared (modality-invariant) branch can be aligned with one of two losses, se
 
 Notes:
 
-- `atp` requires `--use_cmd_sim true` (the default). With `--use_cmd_sim false`, alignment falls back to a domain-adversarial loss regardless of `--shared_align_loss`.
-- The remaining losses (classification, DiffLoss, reconstruction) are unchanged, so only the shared-alignment term is swapped.
+- `atp` requires `--use_cmd_sim true` (the default); combining ATP with `--use_cmd_sim false` raises a configuration error. Domain-adversarial alignment remains available with `--shared_align_loss cmd --use_cmd_sim false`.
+- The task loss, DiffLoss, reconstruction, model structure and prediction path are unchanged. CU is optional and can also be used with CMD for an independent control.
+
+### ATP-all + centroid uniformity (CU)
+
+For each sample, normalize the three shared representations, average them with
+equal weights, then normalize the resulting centroid:
+
+```text
+z_m = normalize(h_shared_m), for m in {text, audio, video}
+u_i = normalize((z_text_i + z_audio_i + z_video_i) / 3)
+L_ATP-all = mean_i (||z_text_i-z_audio_i||² + ||z_text_i-z_video_i||²
+                   + ||z_audio_i-z_video_i||²) / 3
+L_CU = log(mean_{i<j} exp(-cu_tau * ||u_i-u_j||²))
+L_total = L_task + diff_weight * L_diff + sim_weight * L_alignment
+          + recon_weight * L_recon + cu_weight * L_CU
+```
+
+CU excludes self-pairs and uses a stable log-sum-exp calculation. Gradients flow
+through the centroid into all three modalities; the normalization does not
+modify the states used by fusion, reconstruction or DiffLoss. A batch with fewer
+than two total samples has zero CU loss. With `torchrun`, centroids are gathered
+across ranks with autograd, so CU uses the global batch; its backward scaling
+accounts for the solver's existing parameter-gradient averaging. No extra
+division by the number of GPUs is needed. The existing distributed sampler can
+pad an epoch with repeated examples, which remain in the sampled global batch.
+
+CU is normally non-positive: a lower total training loss alone is not evidence
+of better prediction. Logs report task, alignment, reconstruction, DiffLoss and
+CU separately, plus centroid cosine/variance diagnostics (averaged across
+batches). Validation/test `eval_loss` remains task loss only. Shared Sigmoid
+outputs still restrict normalized centroids to the positive region of the sphere.
+
+From `src`, select each version explicitly. Distinct names keep checkpoints
+separate (choose a new name when repeating a run):
+
+```bash
+# Original MISA / CMD
+python train.py --data mosi --seed 336 --shared_align_loss cmd --cu_weight 0 --name mosi_cmd_s336
+
+# Earlier text-anchored ATP
+python train.py --data mosi --seed 336 --shared_align_loss atp --atp_variant text --cu_weight 0 --name mosi_atp_text_s336
+
+# ATP-all, without CU
+python train.py --data mosi --seed 336 --shared_align_loss atp --atp_variant all --cu_weight 0 --name mosi_atp_all_s336
+
+# ATP-all + CU (0.01 is a starting weight, not a tuned optimum)
+python train.py --data mosi --seed 336 --shared_align_loss atp --atp_variant all --cu_weight 0.01 --cu_tau 2 --name mosi_atp_all_cu001_s336
+
+# Same new variant on four GPUs
+torchrun --standalone --nproc_per_node=4 train.py --data mosi --seed 336 --shared_align_loss atp --atp_variant all --cu_weight 0.01 --cu_tau 2 --name mosi_atp_all_cu001_4gpu_s336
+```
+
+The default remains CMD with CU disabled; the existing ATP variant default
+remains `all`. For a validation-only CU weight search, compare `0`, `0.01`,
+`0.05`, and `0.1` with the same seeds and training setup, then evaluate the
+selected setting on the test set. Checkpoints are stored in the repository's
+`checkpoints/` directory.
+
+Loss and distributed-gradient checks (CPU, no dataset/model download), from
+the repository root:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ### Citation
 

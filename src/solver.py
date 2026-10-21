@@ -20,6 +20,7 @@ torch.cuda.manual_seed_all(123)
 
 from utils import to_gpu, time_desc_decorator, DiffLoss, MSE, SIMSE, CMD
 import models
+from shared_alignment import shared_centroids, gather_centroids, centroid_uniformity, centroid_stats
 
 
 class Solver(object):
@@ -112,6 +113,9 @@ class Solver(object):
         if alignment_name == 'atp':
             alignment_name = f'atp-{self.train_config.atp_variant}'
         print(f"Shared alignment: {alignment_name}, weight={self.train_config.sim_weight}")
+        cu_weight = getattr(self.train_config, 'cu_weight', 0.0)
+        cu_tau = getattr(self.train_config, 'cu_tau', 2.0)
+        print(f"Centroid uniformity: weight={cu_weight}, tau={cu_tau}, scope=global batch")
         
         best_valid_loss = float('inf')
         lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.5)
@@ -128,6 +132,7 @@ class Solver(object):
             train_loss_sp = []
             train_loss = []
             alignment_stats = []
+            train_loss_cu, cu_stats = [], []
             for batch in self.train_data_loader:
                 self.model.zero_grad()
                 t, v, a, y, l, bert_sent, bert_sent_type, bert_sent_mask = batch
@@ -159,6 +164,14 @@ class Solver(object):
                     self.train_config.sim_weight * similarity_loss + \
                     self.train_config.recon_weight * recon_loss
 
+                if cu_weight > 0:
+                    centroids = gather_centroids(shared_centroids(
+                        self.model.utt_shared_t, self.model.utt_shared_a, self.model.utt_shared_v))
+                    cu_loss = centroid_uniformity(centroids, tau=cu_tau)
+                    loss = loss + cu_weight * cu_loss
+                    train_loss_cu.append(cu_loss.item())
+                    cu_stats.append(centroid_stats(centroids))
+
                 loss.backward()
 
                 if distributed:
@@ -182,6 +195,19 @@ class Solver(object):
 
             train_losses.append(train_loss)
             print(f"Training loss: {round(np.mean(train_loss), 4)}")
+            print(
+                f"Task loss: {np.mean(train_loss_cls):.6f}, "
+                f"DiffLoss: {np.mean(train_loss_diff):.6f}, "
+                f"reconstruction loss: {np.mean(train_loss_recon):.6f}"
+            )
+            if train_loss_cu:
+                mean_cu = np.mean(train_loss_cu)
+                mean_cu_stats = np.mean(cu_stats, axis=0)
+                print(
+                    f"CU loss: {mean_cu:.6f}, weighted: {cu_weight * mean_cu:.6f}, "
+                    f"centroid_cos={mean_cu_stats[0]:.6f}, "
+                    f"centroid_var={mean_cu_stats[1]:.6e}"
+                )
 
             mean_alignment_loss = np.mean(train_loss_sim)
             print(
@@ -459,7 +485,6 @@ class Solver(object):
         loss += self.loss_recon(self.model.utt_a_recon, self.model.utt_a_orig)
         loss = loss/3.0
         return loss
-
 
 
 
