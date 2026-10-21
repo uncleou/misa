@@ -62,6 +62,19 @@ class Config(object):
         if not math.isfinite(self.cu_tau) or self.cu_tau <= 0:
             raise ValueError('cu_tau must be finite and positive')
 
+        self.sent_weight = getattr(self, 'sent_weight', 0.0)
+        self.sent_sigma = getattr(self, 'sent_sigma', 1.0)
+        self.sent_tau = getattr(self, 'sent_tau', 1.0)
+        if not math.isfinite(self.sent_weight) or self.sent_weight < 0:
+            raise ValueError('sent_weight must be finite and non-negative')
+        for name in ('sent_sigma', 'sent_tau'):
+            if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
+                raise ValueError(f'{name} must be finite and positive')
+        if self.sent_weight > 0 and self.cu_weight > 0:
+            raise ValueError('Choose CU or sentiment centroid loss, not both; set the other weight to 0')
+        if self.sent_weight > 0 and self.data.lower() not in ('mosi', 'mosei'):
+            raise ValueError('Sentiment centroid loss requires continuous MOSI/MOSEI labels')
+
         # Dataset directory: ex) ./datasets/cornell/
         self.dataset_dir = data_dict[self.data.lower()]
         self.sdk_dir = sdk_dir
@@ -121,6 +134,12 @@ def get_config(parse=True, **optional_kwargs):
                         help='Centroid uniformity weight; 0 preserves the existing loss.')
     parser.add_argument('--cu_tau', type=float, default=2.0,
                         help='Positive scale in exp(-cu_tau * squared centroid distance).')
+    parser.add_argument('--sent_weight', type=float, default=0.0,
+                        help='Sentiment centroid KL weight; mutually exclusive with positive cu_weight.')
+    parser.add_argument('--sent_sigma', type=float, default=1.0,
+                        help='Label neighborhood width in exp(-abs(label difference)/sigma).')
+    parser.add_argument('--sent_tau', type=float, default=1.0,
+                        help='Representation temperature in exp(-squared centroid distance/tau).')
     parser.add_argument('--sp_weight', type=float, default=0.0)
     parser.add_argument('--recon_weight', type=float, default=1.0)
 

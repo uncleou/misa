@@ -1,4 +1,4 @@
-"""Sample-centroid uniformity, independent of the model's fusion states."""
+"""Sample-centroid losses, independent of the model's fusion states."""
 
 import math
 
@@ -7,19 +7,22 @@ import torch.distributed as dist
 from torch.nn import functional as F
 
 
-def shared_centroids(shared_t, shared_a, shared_v):
-    """Normalize each modality, average equally, then normalize each centroid."""
+def shared_centroids(shared_t, shared_a, shared_v, normalize_centroid=True):
+    """Average unit modality vectors; only legacy CU renormalizes the mean."""
     normalized = [F.normalize(h, p=2, dim=-1, eps=1e-8)
                   for h in (shared_t, shared_a, shared_v)]
-    return F.normalize(sum(normalized) / 3.0, p=2, dim=-1, eps=1e-8)
+    centroids = sum(normalized) / 3.0
+    if normalize_centroid:
+        centroids = F.normalize(centroids, p=2, dim=-1, eps=1e-8)
+    return centroids
 
 
 def gather_centroids(centroids):
     """Gather the global batch with autograd, including uneven local batches.
 
-    Every rank evaluates the same global CU. The differentiable gather sums
+    Every rank evaluates the same global centroid loss. The differentiable gather sums
     backward contributions across ranks; the solver's subsequent parameter
-    gradient average cancels that factor. Do NOT divide CU by world_size.
+    gradient average cancels that factor. Do NOT divide the loss by world_size.
     """
     if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() == 1:
         return centroids
@@ -33,6 +36,68 @@ def gather_centroids(centroids):
     padded = F.pad(centroids, (0, 0, 0, max(sizes) - centroids.size(0)))
     gathered = all_gather(padded.contiguous())
     return torch.cat([part[:length] for part, length in zip(gathered, sizes)], dim=0)
+
+
+def gather_centroids_and_labels(centroids, labels):
+    """Gather paired rows in rank order; labels are detached supervision only.
+
+    Packing the label column with the centroid guarantees the same ordering and
+    padding removal, even for uneven local batches. Only centroid columns have
+    an autograd path back to the encoder.
+    """
+    if labels.numel() != centroids.size(0):
+        raise ValueError('Expected one scalar sentiment label per centroid')
+    labels = labels.detach().to(centroids).reshape(-1, 1)
+    gathered = gather_centroids(torch.cat((centroids, labels), dim=1))
+    return gathered[:, :-1], gathered[:, -1].detach()
+
+
+def sentiment_centroid_loss(centroids, labels, sigma=1.0, tau=1.0):
+    """Mean KL(q || p) over rows, excluding self from BOTH softmaxes.
+
+    q_ij ~ exp(-abs(y_i-y_j)/sigma)
+    p_ij ~ exp(-squared_distance(c_i,c_j)/tau)
+    Centroids are the means of unit modality vectors, NOT renormalized.
+    """
+    for name, value in (('sigma', sigma), ('tau', tau)):
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f'{name} must be finite and positive')
+    count = centroids.size(0)
+    if labels.numel() != count:
+        raise ValueError('Expected one scalar sentiment label per centroid')
+    if count < 3:
+        # B=2 has one neighbor per row, so both distributions equal [1].
+        return centroids.sum() * 0.0
+
+    off_diagonal = ~torch.eye(count, dtype=torch.bool, device=centroids.device)
+    distances = (centroids[:, None, :] - centroids[None, :, :]).square().sum(dim=-1)
+    logits_p = (-distances / tau)[off_diagonal].reshape(count, count - 1)
+    log_p = F.log_softmax(logits_p, dim=-1)
+    with torch.no_grad():
+        labels = labels.detach().to(centroids).reshape(-1)
+        gaps = (labels[:, None] - labels[None, :]).abs()
+        logits_q = (-gaps / sigma)[off_diagonal].reshape(count, count - 1)
+        log_q = F.log_softmax(logits_q, dim=-1)
+        q = log_q.exp()
+    # Removing the diagonal before softmax avoids 0 * (-inf - -inf).
+    return (q * (log_q - log_p)).sum(dim=-1).mean()
+
+
+@torch.no_grad()
+def sentiment_centroid_stats(centroids, labels):
+    """Nearest-neighbor label gap, raw centroid variance, and mean norm."""
+    count = centroids.size(0)
+    if count < 2:
+        return 0.0, 0.0, centroids.norm(dim=-1).mean().item() if count else 0.0
+    distances = (centroids[:, None, :] - centroids[None, :, :]).square().sum(dim=-1)
+    distances.fill_diagonal_(float('inf'))
+    nearest = distances.argmin(dim=-1)
+    labels = labels.detach().to(centroids).reshape(-1)
+    return (
+        (labels - labels[nearest]).abs().mean().item(),
+        centroids.var(dim=0, unbiased=False).mean().item(),
+        centroids.norm(dim=-1).mean().item(),
+    )
 
 
 def centroid_uniformity(centroids, tau=2.0):

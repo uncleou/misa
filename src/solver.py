@@ -20,7 +20,10 @@ torch.cuda.manual_seed_all(123)
 
 from utils import to_gpu, time_desc_decorator, DiffLoss, MSE, SIMSE, CMD
 import models
-from shared_alignment import shared_centroids, gather_centroids, centroid_uniformity, centroid_stats
+from shared_alignment import (
+    shared_centroids, gather_centroids, centroid_uniformity, centroid_stats,
+    gather_centroids_and_labels, sentiment_centroid_loss, sentiment_centroid_stats,
+)
 
 
 class Solver(object):
@@ -115,7 +118,17 @@ class Solver(object):
         print(f"Shared alignment: {alignment_name}, weight={self.train_config.sim_weight}")
         cu_weight = getattr(self.train_config, 'cu_weight', 0.0)
         cu_tau = getattr(self.train_config, 'cu_tau', 2.0)
+        sent_weight = getattr(self.train_config, 'sent_weight', 0.0)
+        sent_sigma = getattr(self.train_config, 'sent_sigma', 1.0)
+        sent_tau = getattr(self.train_config, 'sent_tau', 1.0)
+        if cu_weight > 0 and sent_weight > 0:
+            raise ValueError('CU and sentiment centroid loss are mutually exclusive')
         print(f"Centroid uniformity: weight={cu_weight}, tau={cu_tau}, scope=global batch")
+        if sent_weight > 0:
+            print(
+                f"Sentiment centroid KL: weight={sent_weight}, sigma={sent_sigma}, "
+                f"tau={sent_tau}, scope=global batch, centroid_normalization=false"
+            )
         
         best_valid_loss = float('inf')
         lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.5)
@@ -133,6 +146,7 @@ class Solver(object):
             train_loss = []
             alignment_stats = []
             train_loss_cu, cu_stats = [], []
+            train_loss_sent, sent_stats = [], []
             for batch in self.train_data_loader:
                 self.model.zero_grad()
                 t, v, a, y, l, bert_sent, bert_sent_type, bert_sent_mask = batch
@@ -171,6 +185,16 @@ class Solver(object):
                     loss = loss + cu_weight * cu_loss
                     train_loss_cu.append(cu_loss.item())
                     cu_stats.append(centroid_stats(centroids))
+                elif sent_weight > 0:
+                    centroids = shared_centroids(
+                        self.model.utt_shared_t, self.model.utt_shared_a,
+                        self.model.utt_shared_v, normalize_centroid=False)
+                    centroids, sentiment_labels = gather_centroids_and_labels(centroids, y)
+                    sent_loss = sentiment_centroid_loss(
+                        centroids, sentiment_labels, sigma=sent_sigma, tau=sent_tau)
+                    loss = loss + sent_weight * sent_loss
+                    train_loss_sent.append(sent_loss.item())
+                    sent_stats.append(sentiment_centroid_stats(centroids, sentiment_labels))
 
                 loss.backward()
 
@@ -207,6 +231,17 @@ class Solver(object):
                     f"CU loss: {mean_cu:.6f}, weighted: {cu_weight * mean_cu:.6f}, "
                     f"centroid_cos={mean_cu_stats[0]:.6f}, "
                     f"centroid_var={mean_cu_stats[1]:.6e}"
+                )
+
+            if train_loss_sent:
+                mean_sent = np.mean(train_loss_sent)
+                mean_sent_stats = np.mean(sent_stats, axis=0)
+                print(
+                    f"Sentiment centroid KL: {mean_sent:.6f}, "
+                    f"weighted: {sent_weight * mean_sent:.6f}, "
+                    f"centroid_nn_label_gap={mean_sent_stats[0]:.6f}, "
+                    f"centroid_var={mean_sent_stats[1]:.6e}, "
+                    f"centroid_norm={mean_sent_stats[2]:.6f}"
                 )
 
             mean_alignment_loss = np.mean(train_loss_sim)
