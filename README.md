@@ -1,6 +1,8 @@
 # MISA: Modality-Invariant and -Specific Representations for Multimodal Sentiment Analysis
 Code for the [ACM MM 2020](https://2020.acmmm.org) paper [MISA: Modality-Invariant and -Specific Representations for Multimodal Sentiment Analysis](https://arxiv.org/pdf/2005.03545.pdf)
 
+Research context for this fork: [研究方案与当前状态](RESEARCH_CONTEXT.md). AI assistants should first read [AGENTS.md](AGENTS.md).
+
 
 <p align="center">
   <img width="600" src="misa-pic.png">
@@ -41,7 +43,7 @@ The shared (modality-invariant) branch can be aligned with one of two losses, se
 | `--sim_weight` | float | `1.0` | Weight of the selected shared alignment loss. |
 | `--cu_weight` | non-negative float | `0.0` | Sample-centroid uniformity weight. Zero disables CU and preserves existing versions. |
 | `--cu_tau` | positive float | `2.0` | Distance scale in the uniformity exponential. |
-| `--sent_weight` | non-negative float | `0.0` | Sentiment-conditioned centroid KL weight; cannot be positive together with `cu_weight`. |
+| `--sent_weight` | non-negative float | `0.0` | Sentiment-conditioned centroid KL weight; exclusive with positive `cu_weight` or `rnc_weight`. |
 | `--sent_sigma` | positive float | `1.0` | Continuous-label neighborhood width (in the original label units). |
 | `--sent_tau` | positive float | `1.0` | Representation neighborhood temperature; divides squared centroid distance. |
 
@@ -164,7 +166,7 @@ Enable exactly one sample-level constraint through its weight:
 | ATP-all + original CU | `--cu_weight 0.01 --sent_weight 0 --cu_tau 2` |
 | ATP-all + sentiment relations | `--cu_weight 0 --sent_weight 0.01 --sent_sigma 1 --sent_tau 1` |
 
-Positive CU and sentiment weights together raise a configuration error. Existing
+At most one of CU, sentiment KL, and RNC weights may be positive; conflicting weights raise a configuration error. Existing
 CMD/ATP/CU commands continue to work because `sent_weight` defaults to zero.
 The example weight and temperatures below are starting settings, not validated
 optima; select them using validation data, keeping the label scale fixed.
@@ -202,3 +204,84 @@ If this paper is useful for your research, please cite us at:
 ### Contact
 
 For any questions, please email at [hazarika@comp.nus.edu.sg](mailto:hazarika@comp.nus.edu.sg)
+
+### ATP-all + Rank-N-Contrast (RNC)
+
+This independent control replaces the **sample-level** CU/KL term with RNC,
+while retaining ATP-all, task supervision, DiffLoss, reconstruction and the
+six-representation Transformer fusion. It adds no model parameters.
+
+This is a **single-view centroid adaptation of the RNC loss**, not a reproduction
+of the original augmented two-view / representation-pretraining pipeline.
+Reference: [Rank-N-Contrast, NeurIPS 2023](https://arxiv.org/abs/2210.01189)
+and [official loss implementation](https://github.com/kaiwenzha/Rank-N-Contrast/blob/main/loss.py).
+No duplicate features are manufactured as a second view.
+
+```text
+c_i = (normalize(shared_t_i) + normalize(shared_a_i) + normalize(shared_v_i)) / 3
+# NO second normalization; same centroid as the sentiment KL variant.
+dy_ij = abs(y_i - y_j)
+s_ij = -||c_i-c_j||_2          # rnc_distance=l2 (official metric)
+s_ij = -||c_i-c_j||_2^2        # rnc_distance=l2sq (controlled variant)
+S_ij = {k != i : dy_ik >= dy_ij}
+L_RNC = mean_{i,j!=i} [logsumexp_{k in S_ij}(s_ik/rnc_tau) - s_ij/rnc_tau]
+L_total = L_task + diff_weight * L_diff + recon_weight * L_recon
+          + sim_weight * L_ATP-all + rnc_weight * L_RNC
+```
+
+The candidate itself and all equally distant label neighbors remain in the
+denominator. Self-pairs are excluded. The mean is over `N*(N-1)` ordered pairs.
+A global batch with fewer than three samples returns a differentiable zero.
+All-equal labels do not generally imply zero RNC: if off-diagonal feature
+distances are also equal, the loss is `log(N-1)` for `N >= 3`.
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `--rnc_weight` | `0.0` | Non-negative finite loss weight; zero disables RNC. |
+| `--rnc_tau` | `2.0` | Positive finite temperature dividing feature distance. |
+| `--rnc_distance` | `l2` | `l2` for the official Euclidean metric; `l2sq` for squared distance, matching the KL metric. |
+
+At most one of `cu_weight`, `sent_weight`, `rnc_weight` may be positive.
+This first version intentionally excludes RNC+KL joint training. RNC uses raw
+continuous MOSI/MOSEI training labels and is rejected for UR_FUNNY. Existing
+commands remain compatible because `rnc_weight` defaults to zero.
+
+Like sentiment KL, RNC uses differentiably gathered **global-batch** centroids
+and correspondingly ordered detached labels under `torchrun`. The loss needs no
+extra `world_size` division with the solver's parameter-gradient averaging.
+Existing distributed-sampler padding still applies. Neither RNC nor labels are
+added to inference; dev/test loss and model selection remain task-based.
+
+Implementation sorts label gaps per row, computes suffix `logcumsumexp`, and
+uses the first index of each tie group to obtain exact denominators. It avoids
+an `N x N x N` mask and uses quadratic pairwise storage. Logs identify the
+metric/temperature/weight and report raw/weighted RNC, nearest-neighbor label
+gap, centroid variance and centroid norm (diagnostics averaged across batches).
+
+From `src`, using distinct names for each run:
+
+```bash
+# ATP-all without sample-level relations
+python train.py --data mosi --seed 336 --shared_align_loss atp --atp_variant all --cu_weight 0 --sent_weight 0 --rnc_weight 0 --name mosi_atp_all_only_s336
+
+# Independent RNC control: official Euclidean distance
+python train.py --data mosi --seed 336 --shared_align_loss atp --atp_variant all --sim_weight 1 --cu_weight 0 --sent_weight 0 --rnc_weight 0.01 --rnc_tau 2 --rnc_distance l2 --name mosi_atp_all_rnc_l2_s336
+
+# Squared-distance control for comparison with sentiment KL
+python train.py --data mosi --seed 336 --shared_align_loss atp --atp_variant all --sim_weight 1 --cu_weight 0 --sent_weight 0 --rnc_weight 0.01 --rnc_tau 2 --rnc_distance l2sq --name mosi_atp_all_rnc_l2sq_s336
+
+# Same RNC version on four GPUs
+torchrun --standalone --nproc_per_node=4 train.py --data mosi --seed 336 --shared_align_loss atp --atp_variant all --sim_weight 1 --cu_weight 0 --sent_weight 0 --rnc_weight 0.01 --rnc_tau 2 --rnc_distance l2 --name mosi_atp_all_rnc_l2_4gpu_s336
+```
+
+The example weight and temperature are starting settings, not tuned results.
+Give RNC and KL comparable validation tuning budgets; equal numerical weights
+or temperatures do not imply equal constraint strength. Keep representation,
+normalization, seeds, effective batch size and evaluation protocol fixed.
+
+Run `python -m unittest discover -s tests -v` from the repository root to check
+formula values and gradients against an explicit reference, label-distance ties,
+permutation invariance, both distances, degenerate batches, existing routes,
+real solver training/evaluation with a tiny model, and two-process CPU Gloo
+value/parameter-gradient equivalence for unequal local batch sizes. The Gloo
+tests require permission to create local processes and communication resources.

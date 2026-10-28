@@ -70,10 +70,21 @@ class Config(object):
         for name in ('sent_sigma', 'sent_tau'):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f'{name} must be finite and positive')
-        if self.sent_weight > 0 and self.cu_weight > 0:
-            raise ValueError('Choose CU or sentiment centroid loss, not both; set the other weight to 0')
+        self.rnc_weight = getattr(self, 'rnc_weight', 0.0)
+        self.rnc_tau = getattr(self, 'rnc_tau', 2.0)
+        self.rnc_distance = getattr(self, 'rnc_distance', 'l2')
+        if not math.isfinite(self.rnc_weight) or self.rnc_weight < 0:
+            raise ValueError('rnc_weight must be finite and non-negative')
+        if not math.isfinite(self.rnc_tau) or self.rnc_tau <= 0:
+            raise ValueError('rnc_tau must be finite and positive')
+        if self.rnc_distance not in ('l2', 'l2sq'):
+            raise ValueError("rnc_distance must be 'l2' or 'l2sq'")
+        if sum(w > 0 for w in (self.cu_weight, self.sent_weight, self.rnc_weight)) > 1:
+            raise ValueError('Choose only one of CU, sentiment centroid KL, or RNC; set other weights to 0')
         if self.sent_weight > 0 and self.data.lower() not in ('mosi', 'mosei'):
             raise ValueError('Sentiment centroid loss requires continuous MOSI/MOSEI labels')
+        if self.rnc_weight > 0 and self.data.lower() not in ('mosi', 'mosei'):
+            raise ValueError('RNC requires continuous MOSI/MOSEI labels')
 
         # Dataset directory: ex) ./datasets/cornell/
         self.dataset_dir = data_dict[self.data.lower()]
@@ -135,11 +146,17 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--cu_tau', type=float, default=2.0,
                         help='Positive scale in exp(-cu_tau * squared centroid distance).')
     parser.add_argument('--sent_weight', type=float, default=0.0,
-                        help='Sentiment centroid KL weight; mutually exclusive with positive cu_weight.')
+                        help='Sentiment centroid KL weight; exclusive with positive CU/RNC weights.')
     parser.add_argument('--sent_sigma', type=float, default=1.0,
                         help='Label neighborhood width in exp(-abs(label difference)/sigma).')
     parser.add_argument('--sent_tau', type=float, default=1.0,
                         help='Representation temperature in exp(-squared centroid distance/tau).')
+    parser.add_argument('--rnc_weight', type=float, default=0.0,
+                        help='Single-view centroid RNC weight; exclusive with positive CU/KL weights.')
+    parser.add_argument('--rnc_tau', type=float, default=2.0,
+                        help='Positive RNC temperature dividing the representation distance.')
+    parser.add_argument('--rnc_distance', choices=('l2', 'l2sq'), default='l2',
+                        help='RNC metric: Euclidean (official) or squared Euclidean (control).')
     parser.add_argument('--sp_weight', type=float, default=0.0)
     parser.add_argument('--recon_weight', type=float, default=1.0)
 

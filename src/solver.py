@@ -23,6 +23,7 @@ import models
 from shared_alignment import (
     shared_centroids, gather_centroids, centroid_uniformity, centroid_stats,
     gather_centroids_and_labels, sentiment_centroid_loss, sentiment_centroid_stats,
+    rnc_centroid_loss,
 )
 
 
@@ -121,13 +122,22 @@ class Solver(object):
         sent_weight = getattr(self.train_config, 'sent_weight', 0.0)
         sent_sigma = getattr(self.train_config, 'sent_sigma', 1.0)
         sent_tau = getattr(self.train_config, 'sent_tau', 1.0)
-        if cu_weight > 0 and sent_weight > 0:
-            raise ValueError('CU and sentiment centroid loss are mutually exclusive')
+        rnc_weight = getattr(self.train_config, 'rnc_weight', 0.0)
+        rnc_tau = getattr(self.train_config, 'rnc_tau', 2.0)
+        rnc_distance = getattr(self.train_config, 'rnc_distance', 'l2')
+        if sum(w > 0 for w in (cu_weight, sent_weight, rnc_weight)) > 1:
+            raise ValueError('CU, sentiment centroid KL, and RNC are mutually exclusive')
         print(f"Centroid uniformity: weight={cu_weight}, tau={cu_tau}, scope=global batch")
         if sent_weight > 0:
             print(
                 f"Sentiment centroid KL: weight={sent_weight}, sigma={sent_sigma}, "
                 f"tau={sent_tau}, scope=global batch, centroid_normalization=false"
+            )
+        if rnc_weight > 0:
+            print(
+                f"Centroid RNC: weight={rnc_weight}, tau={rnc_tau}, "
+                f"distance={rnc_distance}, scope=global batch, "
+                f"centroid_normalization=false, views=single"
             )
         
         best_valid_loss = float('inf')
@@ -147,6 +157,7 @@ class Solver(object):
             alignment_stats = []
             train_loss_cu, cu_stats = [], []
             train_loss_sent, sent_stats = [], []
+            train_loss_rnc, rnc_stats = [], []
             for batch in self.train_data_loader:
                 self.model.zero_grad()
                 t, v, a, y, l, bert_sent, bert_sent_type, bert_sent_mask = batch
@@ -195,6 +206,16 @@ class Solver(object):
                     loss = loss + sent_weight * sent_loss
                     train_loss_sent.append(sent_loss.item())
                     sent_stats.append(sentiment_centroid_stats(centroids, sentiment_labels))
+                elif rnc_weight > 0:
+                    centroids = shared_centroids(
+                        self.model.utt_shared_t, self.model.utt_shared_a,
+                        self.model.utt_shared_v, normalize_centroid=False)
+                    centroids, sentiment_labels = gather_centroids_and_labels(centroids, y)
+                    rnc_loss = rnc_centroid_loss(
+                        centroids, sentiment_labels, tau=rnc_tau, distance=rnc_distance)
+                    loss = loss + rnc_weight * rnc_loss
+                    train_loss_rnc.append(rnc_loss.item())
+                    rnc_stats.append(sentiment_centroid_stats(centroids, sentiment_labels))
 
                 loss.backward()
 
@@ -242,6 +263,17 @@ class Solver(object):
                     f"centroid_nn_label_gap={mean_sent_stats[0]:.6f}, "
                     f"centroid_var={mean_sent_stats[1]:.6e}, "
                     f"centroid_norm={mean_sent_stats[2]:.6f}"
+                )
+
+            if train_loss_rnc:
+                mean_rnc = np.mean(train_loss_rnc)
+                mean_rnc_stats = np.mean(rnc_stats, axis=0)
+                print(
+                    f"Centroid RNC ({rnc_distance}): {mean_rnc:.6f}, "
+                    f"weighted: {rnc_weight * mean_rnc:.6f}, "
+                    f"centroid_nn_label_gap={mean_rnc_stats[0]:.6f}, "
+                    f"centroid_var={mean_rnc_stats[1]:.6e}, "
+                    f"centroid_norm={mean_rnc_stats[2]:.6f}"
                 )
 
             mean_alignment_loss = np.mean(train_loss_sim)

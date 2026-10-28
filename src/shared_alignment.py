@@ -83,6 +83,50 @@ def sentiment_centroid_loss(centroids, labels, sigma=1.0, tau=1.0):
     return (q * (log_q - log_p)).sum(dim=-1).mean()
 
 
+def rnc_centroid_loss(centroids, labels, tau=2.0, distance='l2'):
+    """Single-view Rank-N-Contrast on raw means of unit modality vectors.
+
+    For each ordered pair (i,j), the denominator contains k != i with
+    |y_i-y_k| >= |y_i-y_j|, including j and ALL ties. Average over N*(N-1).
+    This adapts the ranking objective, not the original two-view training scheme:
+    https://github.com/kaiwenzha/Rank-N-Contrast/blob/main/loss.py
+
+    Sorting label gaps and gathering tie-aware suffix log-sums avoids an N^3
+    comparison mask. l2 follows the official metric; l2sq is a controlled variant.
+    """
+    if not math.isfinite(tau) or tau <= 0:
+        raise ValueError('rnc_tau must be finite and positive')
+    if distance not in ('l2', 'l2sq'):
+        raise ValueError("rnc_distance must be 'l2' or 'l2sq'")
+    if centroids.ndim != 2:
+        raise ValueError('Expected centroids of shape [N, D]')
+    count = centroids.size(0)
+    if labels.numel() != count:
+        raise ValueError('Expected one scalar sentiment label per centroid')
+    if count < 3:
+        return centroids.sum() * 0.0
+
+    # Direct Euclidean kernel gives finite gradients even for coincident points.
+    distances = torch.cdist(centroids, centroids, p=2,
+                           compute_mode='donot_use_mm_for_euclid_dist')
+    if distance == 'l2sq':
+        distances = distances.square()
+    off_diagonal = ~torch.eye(count, dtype=torch.bool, device=centroids.device)
+    logits = (-distances / tau)[off_diagonal].reshape(count, count - 1)
+    with torch.no_grad():
+        targets = labels.detach().to(centroids).reshape(-1)
+        gaps = (targets[:, None] - targets[None, :]).abs()
+        gaps = gaps[off_diagonal].reshape(count, count - 1)
+        sorted_gaps, order = gaps.sort(dim=-1)
+        # Every tied candidate must start at the first member of its tie group.
+        starts = torch.searchsorted(sorted_gaps.contiguous(),
+                                    sorted_gaps.contiguous(), right=False)
+    sorted_logits = logits.gather(1, order)
+    log_suffix = torch.logcumsumexp(sorted_logits.flip(1), dim=1).flip(1)
+    log_denominators = log_suffix.gather(1, starts)
+    return (log_denominators - sorted_logits).mean()
+
+
 @torch.no_grad()
 def sentiment_centroid_stats(centroids, labels):
     """Nearest-neighbor label gap, raw centroid variance, and mean norm."""
