@@ -1,6 +1,6 @@
 # 多模态情感分析：研究方案与跨对话上下文
 
-更新日期：2026-10-29（Asia/Shanghai）。在既有 CMD 私有信息诊断基础上新增 MISA-PDR（方案 A）；当前未提交修改也属于本文件记录的实现状态。
+更新日期：2026-10-30（Asia/Shanghai）。在既有 PDR 基础上新增 MISA-SCPS（方案 B）；当前未提交修改也属于本文件记录的实现状态。
 本文件是本项目各对话共同使用的研究背景。它区分用户研究意图、当前实现和候选方向；新对话应先阅读，再核对代码，不能把这里的状态当作永久不变。
 
 ## 1. 研究目标与定位
@@ -120,6 +120,32 @@ MAE/MSE/Corr 均不如 S_T。该现象支持诊断 PP 约束，但没有证明�
 这次不新增私有门控、残差纠错，也不以探针结果宣称音频/视觉无用。
 原 ATP/KL/RNC 代码与研究历史保留；目前先验证 PDR，而非已确定替代全部主线。
 
+### 4.5 当前获准实验：MISA-SCPS（方案 B，2026-10-30）
+
+用户反馈方案 A 无改善，授权直接实现 SCPS（Shared-Context-conditioned Private
+Selection）：一个共享上下文网络、三个逐维门控、保留原融合和损失。
+这只是候选机制，普通门控的创新性有限，不能宣称新颖性或效果已成立。
+
+```text
+c = ReLU(Linear(concat(s_t,s_a,s_v).detach()))  # 3d -> d
+g_m = sigmoid(MLP_m(concat(LayerNorm(p_m), c)))  # 2d -> 64 -> d
+selected_p_m = g_m * p_m
+```
+
+输入共享特征仅在上下文路径 detach，C 与 G 正常训练，共享分支通过融合正常更新。
+门控末层小随机权重＋logit(0.9) 偏置，初始接近放行，无模态间 softmax。
+Transformer token 顺序仍为 T/V/A 私有＋T/V/A 共享；仅私有输入换为 selected。
+原始 p 继续用于重构、DiffLoss，额外辅助损失为零。
+`--variant misa_scps` 默认 CMD、SP=PP=diff_weight（0.3），拒绝与 PDR 不等权或
+ATP/CU/KL/RNC 叠加。可用 `--private_selection none/private_only` 做消融，
+默认 shared_context；none 不创建新增参数，private_only 不创建 C。
+`--scps_hidden 64`、`--scps_init_gate 0.9`；模型状态中新增 private_selector 参数。
+评估读取 config_<name>.json 重建架构，显式冲突报错，严格加载权重。
+旧 CMD 探针暂不支持 SCPS checkpoint；后续如需要，单独扩展架构读取。
+
+运行：`python src/train.py --data mosei --variant misa_scps --seed 336`。
+门控均值与逐维跨样本标准差为训练期间各 rank 的 batch 均值，不解释为因果贡献。
+
 ## 5. 总目标与当前实现状态
 
 主线实验目标：
@@ -222,3 +248,12 @@ eval 模式、按长度排序后的特征/标签/样本 ID 对应，以及没有
 训练路径（验证绝对权重、checkpoint 和配置记录）。原有三项多进程测试在沙箱内
 受系统资源限制中断，获准在沙箱外重跑全部测试通过。尚未运行真实数据训练或
 验证 PDR 性能，也未验证 GPU/NCCL。
+
+### 2026-10-30 MISA-SCPS 验证记录
+
+全部 38 项测试通过，其中新增 7 项：预设限制、门控近 0.9 初始化和 detach 边界、
+真实 MISA 六 token 路由及原始重构/DiffLoss、无门控状态兼容与严格权重恢复、
+private_only 消融、保存配置恢复与冲突拒绝、真实小型 MISA 一轮训练/验证/测试及
+门控参数更新。额外验证评估 --help 无需加载数据或联网。CPU 测试使用小型非 BERT
+MISA；既有测试含模拟 BERT。未运行完整 MOSI/MOSEI 训练或验证 GPU/NCCL，
+不据测试通过宣称效果。

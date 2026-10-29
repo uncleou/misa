@@ -88,13 +88,13 @@ class Config(object):
 
         # Named research presets: independent of model architecture/checkpoint keys.
         self.variant = getattr(self, 'variant', 'default')
-        if self.variant not in ('default', 'misa_pdr', 'misa_pdr_zero'):
+        if self.variant not in ('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps'):
             raise ValueError('Unknown training variant')
         self.diff_weight = getattr(self, 'diff_weight', 0.3)
         sp = getattr(self, 'diff_sp_weight', None)
         pp = getattr(self, 'diff_pp_weight', None)
         self.diff_sp_weight = self.diff_weight if sp is None else sp
-        ratio = {'default': 1.0, 'misa_pdr': 1.0 / 3.0, 'misa_pdr_zero': 0.0}[self.variant]
+        ratio = {'default': 1.0, 'misa_pdr': 1.0 / 3.0, 'misa_pdr_zero': 0.0, 'misa_scps': 1.0}[self.variant]
         self.diff_pp_weight = self.diff_weight * ratio if pp is None else pp
         for key in ('diff_weight', 'diff_sp_weight', 'diff_pp_weight'):
             value = getattr(self, key)
@@ -102,11 +102,27 @@ class Config(object):
                 raise ValueError(f'{key} must be finite and non-negative')
         if self.variant != 'default':
             if self.shared_align_loss != 'cmd' or not self.use_cmd_sim:
-                raise ValueError('MISA-PDR presets require CMD with use_cmd_sim=true')
+                raise ValueError('Named research presets require CMD with use_cmd_sim=true')
             if any(w > 0 for w in (self.cu_weight, self.sent_weight, self.rnc_weight)):
-                raise ValueError('MISA-PDR presets require CU, sentiment KL and RNC weights to be zero')
+                raise ValueError('Named research presets require CU, sentiment KL and RNC weights to be zero')
             if self.data.lower() not in ('mosi', 'mosei'):
-                raise ValueError('MISA-PDR presets support MOSI/MOSEI regression')
+                raise ValueError('Named research presets support MOSI/MOSEI regression')
+        self.private_selection = getattr(self, 'private_selection', None)
+        if self.private_selection is None:
+            self.private_selection = 'shared_context' if self.variant == 'misa_scps' else 'none'
+        if self.private_selection not in ('none', 'private_only', 'shared_context'):
+            raise ValueError('Unknown private_selection mode')
+        if self.variant != 'misa_scps' and self.private_selection != 'none':
+            raise ValueError('Private selection requires --variant misa_scps')
+        self.scps_hidden = getattr(self, 'scps_hidden', 64)
+        self.scps_init_gate = getattr(self, 'scps_init_gate', 0.9)
+        if not isinstance(self.scps_hidden, int) or self.scps_hidden <= 0:
+            raise ValueError('scps_hidden must be a positive integer')
+        if not math.isfinite(self.scps_init_gate) or not 0 < self.scps_init_gate < 1:
+            raise ValueError('scps_init_gate must be strictly between 0 and 1')
+        if self.variant == 'misa_scps' and (
+                self.diff_sp_weight != self.diff_weight or self.diff_pp_weight != self.diff_weight):
+            raise ValueError('MISA-SCPS retains original equal DiffLoss weights; do not combine with PDR')
         # Explicit names win; auto names distinguish runs and reduce collisions.
         if getattr(self, 'name', None) is None:
             stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -156,8 +172,11 @@ def get_config(parse=True, **optional_kwargs):
 
     # Train
     parser.add_argument('--name', type=str, default=None)
-    parser.add_argument('--variant', choices=('default', 'misa_pdr', 'misa_pdr_zero'),
+    parser.add_argument('--variant', choices=('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps'),
                         default='default', help='Named training preset; default preserves existing objectives.')
+    parser.add_argument('--private_selection', choices=('none', 'private_only', 'shared_context'), default=None)
+    parser.add_argument('--scps_hidden', type=int, default=64)
+    parser.add_argument('--scps_init_gate', type=float, default=0.9)
     parser.add_argument('--seed', type=int, default=336)
     parser.add_argument('--num_classes', type=int, default=0)
     parser.add_argument('--batch_size', type=int, default=128)

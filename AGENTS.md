@@ -15,7 +15,10 @@
 
 2026-10-29 用户已授权方案 A，训练版本名 MISA-PDR，参数 `--variant misa_pdr`；
 其 CMD 骨干 SP/PP 默认系数 0.3/0.1，`misa_pdr_zero` 为 0.3/0。
-当前先验证 PDR，不能因历史 ATP-all 主线而擅自启用 ATP 或质心损失。
+2026-10-30 用户反馈 PDR 无改善，现已授权方案 B：`--variant misa_scps`。
+SCPS 为共享上下文网络＋三个逐维私有门控，仅修改融合输入，原始表示仍用于重构
+和 DiffLoss；默认 CMD、SP=PP=0.3，不叠加 PDR/ATP/KL/RNC。
+当前先验证 SCPS，不能因历史 ATP-all 主线而擅自启用 ATP 或质心损失。
 具体预设、权重覆盖和运行方式见 RESEARCH_CONTEXT.md / README.md。
 
 ## 跨对话一致性

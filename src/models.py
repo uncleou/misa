@@ -9,6 +9,7 @@ from transformers import BertModel, BertConfig
 
 from utils import to_gpu
 from utils import ReverseLayerF
+from private_selection import PrivateSelection
 
 
 def masked_mean(tensor, mask, dim):
@@ -158,6 +159,12 @@ class MISA(nn.Module):
 
         encoder_layer = nn.TransformerEncoderLayer(d_model=self.config.hidden_size, nhead=2)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=1)
+        # Append new modules after legacy initialization to preserve old backbone RNG order.
+        selection_mode = getattr(config, 'private_selection', 'none')
+        self.private_selector = (PrivateSelection(config.hidden_size, config.scps_hidden,
+                                                 config.scps_init_gate, selection_mode)
+                                 if selection_mode != 'none' else None)
+
 
         
 
@@ -244,7 +251,16 @@ class MISA(nn.Module):
         self.reconstruct()
         
         # 1-LAYER TRANSFORMER FUSION
-        h = torch.stack((self.utt_private_t, self.utt_private_v, self.utt_private_a, self.utt_shared_t, self.utt_shared_v,  self.utt_shared_a), dim=0)
+        private = {m: getattr(self, 'utt_private_' + m) for m in ('t', 'a', 'v')}
+        self.private_gates = {}
+        if self.private_selector is not None:
+            shared = {m: getattr(self, 'utt_shared_' + m) for m in ('t', 'a', 'v')}
+            private, self.private_gates = self.private_selector(shared, private)
+        for m, value in private.items():
+            setattr(self, 'utt_selected_private_' + m, value)
+        # Preserve the original token order T,V,A,T,V,A.
+        h = torch.stack((private['t'], private['v'], private['a'],
+                         self.utt_shared_t, self.utt_shared_v, self.utt_shared_a), dim=0)
         h = self.transformer_encoder(h)
         h = torch.cat((h[0], h[1], h[2], h[3], h[4], h[5]), dim=1)
         o = self.fusion(h)

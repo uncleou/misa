@@ -163,6 +163,7 @@ class Solver(object):
             train_loss_sp = []
             train_loss = []
             alignment_stats = []
+            gate_stats = []
             train_loss_cu, cu_stats = [], []
             train_loss_sent, sent_stats = [], []
             train_loss_rnc, rnc_stats = [], []
@@ -184,6 +185,14 @@ class Solver(object):
                 
                 if self.train_config.data == "ur_funny":
                     y = y.squeeze()
+
+                if getattr(self.model, 'private_gates', None):
+                    with torch.no_grad():
+                        values = []
+                        for m in ('t', 'a', 'v'):
+                            gate = self.model.private_gates[m].detach()
+                            values.extend((gate.mean().item(), gate.std(dim=0, unbiased=False).mean().item()))
+                        gate_stats.append(values)
 
                 cls_loss = criterion(y_tilde, y)
                 # Equal weights retain the legacy route (including legacy callers).
@@ -262,6 +271,11 @@ class Solver(object):
                 f"DiffLoss weighted: {np.mean(train_loss_diff_weighted):.6f}, "
                 f"reconstruction loss: {np.mean(train_loss_recon):.6f}"
             )
+            if gate_stats:
+                mean_gates = np.mean(gate_stats, axis=0)
+                print('SCPS gates (batch-averaged mean / per-dimension sample std): ' +
+                      ', '.join(f'{m}={mean_gates[2*i]:.6f}/{mean_gates[2*i+1]:.6f}'
+                                for i, m in enumerate(('t', 'a', 'v'))))
             if train_loss_cu:
                 mean_cu = np.mean(train_loss_cu)
                 mean_cu_stats = np.mean(cu_stats, axis=0)

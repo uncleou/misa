@@ -1,3 +1,55 @@
+## MISA-SCPS：共享上下文条件化的私有选择（方案 B）
+
+`misa_scps` = **Shared-Context-conditioned Private Selection**。第一版用于检验融合前
+私有特征筛选的机制，是候选研究版本，不代表已经验证的新颖性或收益。
+
+- 一个上下文网络：`c = ReLU(Linear(concat(s_t,s_a,s_v).detach()))`，3d→d。
+- 三个独立门控：`g_m = sigmoid(Linear(ReLU(Linear(concat(LayerNorm(p_m),c)))))`，
+  2d→64→d；`selected_p_m = g_m * p_m`。不做模态间 softmax。
+- 门控输入归一化不改变原始私有表示；每个门控末层小随机权重、bias=logit(0.9)，
+  初始接近放行且第一步上下文网络即可获得梯度，没有预设文本优势。
+- 仅共享上下文输入 detach，C 本身可训练，共享分支仍通过原融合路径更新。
+- 六个 token 仍按原来的 `p_t,p_v,p_a,s_t,s_v,s_a` 顺序，只替换前三个为筛选表示。
+- 重构、CMD、DiffLoss 均使用原始表示；无新增损失。默认 SP=PP=0.3，保留原 MISA
+  损失，预设拒绝 ATP/CU/KL/RNC 和不等权的 PDR 组合。
+
+从项目根目录从头训练：
+
+```bash
+python src/train.py --data mosei --variant misa_scps --seed 336
+# 多卡（与原基线保持相同 GPU 数和训练设置）
+torchrun --standalone --nproc_per_node=4 src/train.py --data mosei --variant misa_scps --seed 336
+```
+
+将 mosei 换成 mosi 切换数据集。默认自动运行名包含数据集/版本/种子/时间，显式
+`--name` 仍可使用。`--scps_hidden 64` 与 `--scps_init_gate 0.9` 可调。
+日志中的每模态 gate mean / sample std 是训练期间逐 batch 均值，多卡为各 rank
+本地诊断，不是全数据固定模型统计，也不是模态因果贡献。
+
+消融（都不引入新损失）：
+
+```bash
+# 无门控，同原始骨干，无新增参数
+python src/train.py --data mosei --variant misa_scps --private_selection none --seed 336
+# 只看私有表示，无共享上下文网络；输入宽度不同，不是精确等参数对照
+python src/train.py --data mosei --variant misa_scps --private_selection private_only --seed 336
+```
+
+最佳 checkpoint 旁的 `config_<name>.json` 保存架构与损失配置。评估自动读回配置：
+
+```bash
+python src/evaluate.py --name <训练日志中的运行名>
+```
+
+请一起保留/传输 model 与 config 文件。显式评估参数与保存配置冲突会报错，避免
+错误重建架构。旧无 config 的模型仍按原默认架构评估；无 config 的默认 SCPS
+权重可显式加 `--data mosei --variant misa_scps`（非默认架构需保留原配置）。
+SCPS 增加参数，不能严格加载旧 MISA 权重，也不支持自动忽略缺失参数。
+旧 `cmd_private_probe_v1` 限定原 CMD 架构，暂不支持 SCPS checkpoint。
+
+验证：`python -m unittest discover -s tests -p 'test_private_selection.py' -v`。
+此版本尚未运行完整数据训练；不据门控数值或测试通过宣称效果。
+
 ## MISA-PDR：私有去相关约束放松（方案 A）
 
 `misa_pdr` = **MISA Private Decorrelation Relaxation**。这是研究实验版本名，
