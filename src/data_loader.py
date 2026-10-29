@@ -9,17 +9,26 @@ from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_se
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from transformers import BertTokenizer
 
-from create_dataset import MOSI, MOSEI, UR_FUNNY, PAD, UNK
+from create_dataset import MOSI, MOSEI, UR_FUNNY, PAD, UNK, load_pickle
 
 
 bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
 
 class MSADataset(Dataset):
-    def __init__(self, config):
+    def __init__(self, config, diagnostic=False):
 
         ## Fetch dataset
-        if "mosi" in str(config.data_dir).lower():
+        if diagnostic:
+            if config.data not in ('mosi', 'mosei') or config.mode not in ('train', 'dev'):
+                raise ValueError('Diagnostics support only MOSI/MOSEI train/dev caches')
+            # Do not read test.pkl or trigger the baseline's dataset rebuilding path.
+            self.data = load_pickle(str(config.dataset_dir / (config.mode + '.pkl')))
+            self.pretrained_emb, self.word2id = torch.load(
+                config.dataset_dir / 'embedding_and_mapping.pt',
+                map_location='cpu', weights_only=False)
+            dataset = None
+        elif "mosi" in str(config.data_dir).lower():
             dataset = MOSI(config)
         elif "mosei" in str(config.data_dir).lower():
             dataset = MOSEI(config)
@@ -29,17 +38,25 @@ class MSADataset(Dataset):
             print("Dataset not defined correctly")
             exit()
         
-        self.data, self.word2id, self.pretrained_emb = dataset.get_data(config.mode)
+        if not diagnostic:
+            self.data, self.word2id, self.pretrained_emb = dataset.get_data(config.mode)
         self.len = len(self.data)
+        if not self.len:
+            raise ValueError('Empty dataset split: ' + config.mode)
 
         config.visual_size = self.data[0][0][1].shape[1]
         config.acoustic_size = self.data[0][0][2].shape[1]
 
         config.word2id = self.word2id
         config.pretrained_emb = self.pretrained_emb
+        self.diagnostic = diagnostic
 
 
     def __getitem__(self, index):
+        if self.diagnostic:
+            sample = self.data[index]
+            segment = str(sample[2]) if len(sample) > 2 else ''
+            return sample[0], sample[1], '{}:{}'.format(index, segment)
         return self.data[index]
 
     def __len__(self):
@@ -47,10 +64,10 @@ class MSADataset(Dataset):
 
 
 
-def get_loader(config, shuffle=True):
+def get_loader(config, shuffle=True, diagnostic=False):
     """Load DataLoader of given DialogDataset"""
 
-    dataset = MSADataset(config)
+    dataset = MSADataset(config, diagnostic=diagnostic)
     
     print(config.mode)
     config.data_len = len(dataset)
@@ -94,7 +111,11 @@ def get_loader(config, shuffle=True):
         # lengths are useful later in using RNNs
         lengths = torch.LongTensor([sample[0][0].shape[0] for sample in batch])
 
-        return sentences, visual, acoustic, labels, lengths, bert_sentences, bert_sentence_types, bert_sentence_att_mask
+        tensors = (sentences, visual, acoustic, labels, lengths, bert_sentences,
+                   bert_sentence_types, bert_sentence_att_mask)
+        if diagnostic:
+            return tensors + ([sample[2] for sample in batch],)
+        return tensors
 
 
     distributed_train = (
@@ -102,6 +123,8 @@ def get_loader(config, shuffle=True):
         and torch.distributed.is_initialized()
         and config.mode == 'train'
     )
+    if diagnostic and torch.distributed.is_available() and torch.distributed.is_initialized():
+        raise ValueError('Diagnostic extraction is single-process; do not use torchrun')
     sampler = (
         DistributedSampler(dataset, shuffle=shuffle, seed=config.seed)
         if distributed_train else None
