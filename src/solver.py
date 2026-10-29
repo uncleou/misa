@@ -1,4 +1,5 @@
 import os
+import json
 import math
 from math import isnan
 import re
@@ -140,6 +141,12 @@ class Solver(object):
                 f"centroid_normalization=false, views=single"
             )
         
+        diff_sp_weight = getattr(self.train_config, 'diff_sp_weight', self.train_config.diff_weight)
+        diff_pp_weight = getattr(self.train_config, 'diff_pp_weight', self.train_config.diff_weight)
+        print(f"Training variant: {getattr(self.train_config, 'variant', 'default')}; "
+              f"DiffLoss absolute weights: shared_private={diff_sp_weight:g}, "
+              f"private_private={diff_pp_weight:g}")
+
         best_valid_loss = float('inf')
         lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.5)
         
@@ -152,6 +159,7 @@ class Solver(object):
 
             train_loss_cls, train_loss_sim, train_loss_diff = [], [], []
             train_loss_recon = []
+            train_loss_diff_weighted = []
             train_loss_sp = []
             train_loss = []
             alignment_stats = []
@@ -178,14 +186,21 @@ class Solver(object):
                     y = y.squeeze()
 
                 cls_loss = criterion(y_tilde, y)
-                diff_loss = self.get_diff_loss()
+                # Equal weights retain the legacy route (including legacy callers).
+                if diff_sp_weight == diff_pp_weight:
+                    diff_loss = self.get_diff_loss()
+                    weighted_diff = diff_sp_weight * diff_loss
+                else:
+                    diff_sp, diff_pp = self.get_diff_loss(return_parts=True)
+                    diff_loss = diff_sp + diff_pp
+                    weighted_diff = diff_sp_weight * diff_sp + diff_pp_weight * diff_pp
                 recon_loss = self.get_recon_loss()
                 similarity_loss = self.get_similarity_loss()
                 if alignment_name.startswith('atp'):
                     alignment_stats.append(self.get_shared_alignment_stats())
                 
                 loss = cls_loss + \
-                    self.train_config.diff_weight * diff_loss + \
+                    weighted_diff + \
                     self.train_config.sim_weight * similarity_loss + \
                     self.train_config.recon_weight * recon_loss
 
@@ -233,6 +248,7 @@ class Solver(object):
 
                 train_loss_cls.append(cls_loss.item())
                 train_loss_diff.append(diff_loss.item())
+                train_loss_diff_weighted.append(weighted_diff.item())
                 train_loss_recon.append(recon_loss.item())
                 train_loss.append(loss.item())
                 train_loss_sim.append(similarity_loss.item())
@@ -242,7 +258,8 @@ class Solver(object):
             print(f"Training loss: {round(np.mean(train_loss), 4)}")
             print(
                 f"Task loss: {np.mean(train_loss_cls):.6f}, "
-                f"DiffLoss: {np.mean(train_loss_diff):.6f}, "
+                f"DiffLoss raw: {np.mean(train_loss_diff):.6f}, "
+                f"DiffLoss weighted: {np.mean(train_loss_diff_weighted):.6f}, "
                 f"reconstruction loss: {np.mean(train_loss_recon):.6f}"
             )
             if train_loss_cu:
@@ -302,6 +319,11 @@ class Solver(object):
                 if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
                     self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
                     torch.save(self.model.state_dict(), self.checkpoint_dir / f'model_{self.train_config.name}.std')
+                    config_path = self.checkpoint_dir / f'config_{self.train_config.name}.json'
+                    config_path.write_text(json.dumps(
+                        {key: value for key, value in vars(self.train_config).items()
+                         if key not in ('pretrained_emb', 'word2id')},
+                        ensure_ascii=False, indent=2, default=str), encoding='utf-8')
                     torch.save(self.optimizer.state_dict(), self.checkpoint_dir / f'optim_{self.train_config.name}.std')
                 if torch.distributed.is_initialized():
                     torch.distributed.barrier()
@@ -524,7 +546,7 @@ class Solver(object):
 
         return loss
 
-    def get_diff_loss(self):
+    def get_diff_loss(self, return_parts=False):
 
         shared_t = self.model.utt_shared_t
         shared_v = self.model.utt_shared_v
@@ -538,11 +560,16 @@ class Solver(object):
         loss += self.loss_diff(private_v, shared_v)
         loss += self.loss_diff(private_a, shared_a)
 
-        # Across privates
-        loss += self.loss_diff(private_a, private_t)
-        loss += self.loss_diff(private_a, private_v)
-        loss += self.loss_diff(private_t, private_v)
-
+        # Three SP pairs and three PP pairs are sums, as in original MISA.
+        pp_at = self.loss_diff(private_a, private_t)
+        pp_av = self.loss_diff(private_a, private_v)
+        pp_tv = self.loss_diff(private_t, private_v)
+        if return_parts:
+            return loss, pp_at + pp_av + pp_tv
+        # Preserve legacy accumulation order when using a single common weight.
+        loss += pp_at
+        loss += pp_av
+        loss += pp_tv
         return loss
     
     def get_recon_loss(self, ):

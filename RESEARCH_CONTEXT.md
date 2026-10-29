@@ -1,6 +1,6 @@
 # 多模态情感分析：研究方案与跨对话上下文
 
-更新日期：2026-10-29（Asia/Shanghai）。在既有独立 RNC 对照基础上新增 CMD 私有信息诊断；当前未提交修改也属于本文件记录的实现状态。
+更新日期：2026-10-29（Asia/Shanghai）。在既有 CMD 私有信息诊断基础上新增 MISA-PDR（方案 A）；当前未提交修改也属于本文件记录的实现状态。
 本文件是本项目各对话共同使用的研究背景。它区分用户研究意图、当前实现和候选方向；新对话应先阅读，再核对代码，不能把这里的状态当作永久不变。
 
 ## 1. 研究目标与定位
@@ -100,6 +100,26 @@ CU、KL、RNC 三个跨样本约束互斥；项目仍默认 CMD，已有 ATP/CU/
 独立测试位于 tests/test_rnc_centroids.py；运行命令及比较原则见 README.md。
 RNC 版本总目标是在既有 MISA＋ATP-all 上加入 `rnc_weight * L_RNC`，不加入 CU 或 KL。
 
+### 4.4 当前获准实验：MISA-PDR（方案 A，2026-10-29）
+
+用户确认先进行私有去相关约束放松，版本名 **MISA-PDR**（Private Decorrelation Relaxation）。
+入口 `python src/train.py --variant misa_pdr --data mosei --seed 336`。
+使用 CMD，保留六 token 融合、重构与数据协议，不叠加 ATP/CU/KL/RNC。
+`diff_sp_weight` 约束同模态共享/私有三对；`diff_pp_weight` 约束跨模态私有三对。
+两者为绝对系数，三对各求和；不二次乘 `diff_weight`。
+
+- `default`：SP=PP=diff_weight，保持旧命令损失（默认均 0.3）。
+- `misa_pdr`：SP=diff_weight，PP=diff_weight/3（默认 0.3/0.1）。
+- `misa_pdr_zero`：SP=diff_weight，PP=0。
+- 显式 diff_sp_weight/diff_pp_weight 覆盖预设权重；CMD/零额外损失的预设限制仍生效。
+- 未指定 name 时生成数据集/版本/种子/时间运行名，多卡同步 rank 0 名称。
+- 保存 config_<name>.json；日志打印实际权重和加权贡献。checkpoint 参数结构不变。
+
+已有私有探针结果由用户提供：五个编码器下 S_T 的回归指标均改善；全部私有的
+MAE/MSE/Corr 均不如 S_T。该现象支持诊断 PP 约束，但没有证明负效应来自 DiffLoss。
+这次不新增私有门控、残差纠错，也不以探针结果宣称音频/视觉无用。
+原 ATP/KL/RNC 代码与研究历史保留；目前先验证 PDR，而非已确定替代全部主线。
+
 ## 5. 总目标与当前实现状态
 
 主线实验目标：
@@ -194,3 +214,11 @@ eval 模式、按长度排序后的特征/标签/样本 ID 对应，以及没有
 验证来源哈希、输出完整性和拒绝覆盖已有目录。原有 3 项分布式测试首次受沙箱共享内存
 限制，在获准沙箱外重跑后通过。未使用真实 CMD checkpoint 或完整 MOSI/MOSEI 数据
 运行诊断，未验证私有分支预测收益或真实 GPU 运行。
+
+### 2026-10-29 MISA-PDR 验证记录
+
+31 项测试通过，其中新增 4 项 PDR 测试：默认兼容/预设/显式覆盖、非法参数与
+预设冲突、六对 DiffLoss 值和梯度、原始/PDR/PDR-zero 三条真实 solver 小模型
+训练路径（验证绝对权重、checkpoint 和配置记录）。原有三项多进程测试在沙箱内
+受系统资源限制中断，获准在沙箱外重跑全部测试通过。尚未运行真实数据训练或
+验证 PDR 性能，也未验证 GPU/NCCL。

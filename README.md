@@ -1,3 +1,57 @@
+## MISA-PDR：私有去相关约束放松（方案 A）
+
+`misa_pdr` = **MISA Private Decorrelation Relaxation**。这是研究实验版本名，
+不是已经验证有效的新算法。使用 CMD，保留重构和六表示 Transformer 融合；
+仅拆分 DiffLoss 的共享/私有（SP）和私有/私有（PP）权重。
+
+```text
+L_SP = D(p_t,s_t) + D(p_v,s_v) + D(p_a,s_a)
+L_PP = D(p_a,p_t) + D(p_a,p_v) + D(p_t,p_v)
+L = L_task + diff_sp_weight*L_SP + diff_pp_weight*L_PP
+    + sim_weight*L_CMD + recon_weight*L_recon
+```
+
+两部分都是三对的和，不额外除以 3。两个新权重是绝对系数，不再额外乘 diff_weight。
+
+| --variant | SP 默认权重 | PP 默认权重 | 用途 |
+| --- | --- | --- | --- |
+| default | diff_weight（默认 0.3） | diff_weight（默认 0.3） | 原始对照；旧命令保持原损失 |
+| misa_pdr | diff_weight | diff_weight/3（默认 0.1） | 方案 A，减弱 PP |
+| misa_pdr_zero | diff_weight | 0 | 方案 A，关闭 PP |
+
+显式 `--diff_sp_weight` / `--diff_pp_weight` 优先于默认值。例如基线的 diff_weight
+为 0.6 时，misa_pdr 自动用 0.6/0.2；也可以分别指定两个绝对权重。
+预设拒绝 ATP、域对抗和正权重 CU/KL/RNC，避免混杂；额外组合需显式选 default。
+
+从头训练（项目根目录执行；将 mosei 改为 mosi 即可切换数据集）：
+
+```bash
+python src/train.py --data mosei --variant misa_pdr --seed 336
+python src/train.py --data mosei --variant misa_pdr_zero --seed 336
+python src/train.py --data mosei --variant default --seed 336
+```
+
+未指定 `--name` 时自动生成含数据集、版本、种子和时间的运行名；显式 name 仍受支持。
+多卡示例：
+
+```bash
+torchrun --standalone --nproc_per_node=4 src/train.py --data mosei --variant misa_pdr --seed 336
+```
+
+日志打印解析后的 SP/PP 绝对权重、未加权 DiffLoss 和实际加权贡献；最佳 checkpoint
+旁新增 `config_<name>.json` 记录配置，模型权重格式不变。评估仍用原入口：
+
+```bash
+python src/evaluate.py --data mosei --name <训练日志中的运行名> --shared_align_loss cmd
+```
+
+保持与原 CMD 实验相同的其他参数、数据和配对种子（建议 336–340）。可先做三个种子
+检查趋势，再补齐五个；验证集选模，测试集不用于调参。PDR-zero 只关闭 PP 损失，
+私有编码器依旧从任务、SP 和重构接收梯度。训练完成后可复用私有探针诊断新表示。
+
+验证：`python -m unittest discover -s tests -p 'test_pdr.py' -v`。
+尚未运行完整 MOSI/MOSEI 训练，不能从代码验证推断实际性能收益。
+
 # MISA: Modality-Invariant and -Specific Representations for Multimodal Sentiment Analysis
 Code for the [ACM MM 2020](https://2020.acmmm.org) paper [MISA: Modality-Invariant and -Specific Representations for Multimodal Sentiment Analysis](https://arxiv.org/pdf/2005.03545.pdf)
 

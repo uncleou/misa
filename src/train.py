@@ -27,6 +27,13 @@ if __name__ == '__main__':
     dev_config = get_config(mode='dev')
     test_config = get_config(mode='test')
 
+    # All ranks and split configs must refer to the same checkpoint name.
+    if distributed:
+        run_name = [train_config.name if dist.get_rank() == 0 else None]
+        dist.broadcast_object_list(run_name, src=0)
+        train_config.name = run_name[0]
+    dev_config.name = test_config.name = train_config.name
+
     # Setting random seed
     random_seed = train_config.seed
     random.seed(random_seed)

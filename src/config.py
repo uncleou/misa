@@ -86,6 +86,32 @@ class Config(object):
         if self.rnc_weight > 0 and self.data.lower() not in ('mosi', 'mosei'):
             raise ValueError('RNC requires continuous MOSI/MOSEI labels')
 
+        # Named research presets: independent of model architecture/checkpoint keys.
+        self.variant = getattr(self, 'variant', 'default')
+        if self.variant not in ('default', 'misa_pdr', 'misa_pdr_zero'):
+            raise ValueError('Unknown training variant')
+        self.diff_weight = getattr(self, 'diff_weight', 0.3)
+        sp = getattr(self, 'diff_sp_weight', None)
+        pp = getattr(self, 'diff_pp_weight', None)
+        self.diff_sp_weight = self.diff_weight if sp is None else sp
+        ratio = {'default': 1.0, 'misa_pdr': 1.0 / 3.0, 'misa_pdr_zero': 0.0}[self.variant]
+        self.diff_pp_weight = self.diff_weight * ratio if pp is None else pp
+        for key in ('diff_weight', 'diff_sp_weight', 'diff_pp_weight'):
+            value = getattr(self, key)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f'{key} must be finite and non-negative')
+        if self.variant != 'default':
+            if self.shared_align_loss != 'cmd' or not self.use_cmd_sim:
+                raise ValueError('MISA-PDR presets require CMD with use_cmd_sim=true')
+            if any(w > 0 for w in (self.cu_weight, self.sent_weight, self.rnc_weight)):
+                raise ValueError('MISA-PDR presets require CU, sentiment KL and RNC weights to be zero')
+            if self.data.lower() not in ('mosi', 'mosei'):
+                raise ValueError('MISA-PDR presets support MOSI/MOSEI regression')
+        # Explicit names win; auto names distinguish runs and reduce collisions.
+        if getattr(self, 'name', None) is None:
+            stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            self.name = f'{self.data}_{self.variant}_s{getattr(self, "seed", 336)}_{stamp}'
+
         # Dataset directory: ex) ./datasets/cornell/
         self.dataset_dir = data_dict[self.data.lower()]
         self.sdk_dir = sdk_dir
@@ -129,8 +155,9 @@ def get_config(parse=True, **optional_kwargs):
     )
 
     # Train
-    time_now = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
-    parser.add_argument('--name', type=str, default=f"{time_now}")
+    parser.add_argument('--name', type=str, default=None)
+    parser.add_argument('--variant', choices=('default', 'misa_pdr', 'misa_pdr_zero'),
+                        default='default', help='Named training preset; default preserves existing objectives.')
     parser.add_argument('--seed', type=int, default=336)
     parser.add_argument('--num_classes', type=int, default=0)
     parser.add_argument('--batch_size', type=int, default=128)
@@ -138,7 +165,12 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--n_epoch', type=int, default=500)
     parser.add_argument('--patience', type=int, default=6)
 
-    parser.add_argument('--diff_weight', type=float, default=0.3)
+    parser.add_argument('--diff_weight', type=float, default=0.3,
+                        help='Legacy DiffLoss weight; base for unset SP/PP weights.')
+    parser.add_argument('--diff_sp_weight', type=float, default=None,
+                        help='Absolute shared/private DiffLoss weight; overrides preset default.')
+    parser.add_argument('--diff_pp_weight', type=float, default=None,
+                        help='Absolute private/private DiffLoss weight; overrides preset default.')
     parser.add_argument('--sim_weight', type=float, default=1.0,
                         help='Weight of the selected shared alignment loss.')
     parser.add_argument('--cu_weight', type=float, default=0.0,
