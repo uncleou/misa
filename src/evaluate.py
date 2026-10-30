@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument('--name', required=True,
                         help='Checkpoint name (checkpoints/model_<name>.std).')
     parser.add_argument('--shared_align_loss', choices=('cmd', 'atp'), default=None)
-    parser.add_argument('--variant', choices=('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps'), default=None)
+    parser.add_argument('--variant', choices=('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps', 'misa_scps_v2'), default=None)
     parser.add_argument('--private_selection', choices=('none', 'private_only', 'shared_context'), default=None)
     parser.add_argument('--scps_hidden', type=int, default=None)
     parser.add_argument('--output', default=None,
@@ -34,6 +34,7 @@ def build_eval_config(args, project_dir=PROJECT_DIR):
     path = Path(project_dir) / 'checkpoints' / f'config_{args.name}.json'
     saved = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
     fields = ('data', 'variant', 'private_selection', 'scps_hidden', 'scps_init_gate',
+              'scps_init_std', 'gate_lr_mult', 'scps_diagnostics',
               'use_bert', 'use_cmd_sim', 'shared_align_loss', 'atp_variant',
               'hidden_size', 'embedding_size', 'rnncell', 'dropout', 'num_classes',
               'diff_weight', 'diff_sp_weight', 'diff_pp_weight', 'cu_weight',

@@ -88,13 +88,13 @@ class Config(object):
 
         # Named research presets: independent of model architecture/checkpoint keys.
         self.variant = getattr(self, 'variant', 'default')
-        if self.variant not in ('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps'):
+        if self.variant not in ('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps', 'misa_scps_v2'):
             raise ValueError('Unknown training variant')
         self.diff_weight = getattr(self, 'diff_weight', 0.3)
         sp = getattr(self, 'diff_sp_weight', None)
         pp = getattr(self, 'diff_pp_weight', None)
         self.diff_sp_weight = self.diff_weight if sp is None else sp
-        ratio = {'default': 1.0, 'misa_pdr': 1.0 / 3.0, 'misa_pdr_zero': 0.0, 'misa_scps': 1.0}[self.variant]
+        ratio = {'default': 1.0, 'misa_pdr': 1.0 / 3.0, 'misa_pdr_zero': 0.0, 'misa_scps': 1.0, 'misa_scps_v2': 1.0}[self.variant]
         self.diff_pp_weight = self.diff_weight * ratio if pp is None else pp
         for key in ('diff_weight', 'diff_sp_weight', 'diff_pp_weight'):
             value = getattr(self, key)
@@ -109,10 +109,10 @@ class Config(object):
                 raise ValueError('Named research presets support MOSI/MOSEI regression')
         self.private_selection = getattr(self, 'private_selection', None)
         if self.private_selection is None:
-            self.private_selection = 'shared_context' if self.variant == 'misa_scps' else 'none'
+            self.private_selection = 'shared_context' if self.variant in ('misa_scps', 'misa_scps_v2') else 'none'
         if self.private_selection not in ('none', 'private_only', 'shared_context'):
             raise ValueError('Unknown private_selection mode')
-        if self.variant != 'misa_scps' and self.private_selection != 'none':
+        if self.variant not in ('misa_scps', 'misa_scps_v2') and self.private_selection != 'none':
             raise ValueError('Private selection requires --variant misa_scps')
         self.scps_hidden = getattr(self, 'scps_hidden', 64)
         self.scps_init_gate = getattr(self, 'scps_init_gate', 0.9)
@@ -120,9 +120,24 @@ class Config(object):
             raise ValueError('scps_hidden must be a positive integer')
         if not math.isfinite(self.scps_init_gate) or not 0 < self.scps_init_gate < 1:
             raise ValueError('scps_init_gate must be strictly between 0 and 1')
-        if self.variant == 'misa_scps' and (
+        if self.variant in ('misa_scps', 'misa_scps_v2') and (
                 self.diff_sp_weight != self.diff_weight or self.diff_pp_weight != self.diff_weight):
             raise ValueError('MISA-SCPS retains original equal DiffLoss weights; do not combine with PDR')
+        v2 = self.variant == 'misa_scps_v2'
+        self.scps_init_std = getattr(self, 'scps_init_std', None)
+        if self.scps_init_std is None:
+            self.scps_init_std = 1e-2 if v2 else 1e-3
+        self.gate_lr_mult = getattr(self, 'gate_lr_mult', None)
+        if self.gate_lr_mult is None:
+            self.gate_lr_mult = 3.0 if v2 else 1.0
+        self.scps_diagnostics = getattr(self, 'scps_diagnostics', None)
+        if self.scps_diagnostics is None:
+            self.scps_diagnostics = v2
+        for key in ('scps_init_std', 'gate_lr_mult'):
+            if not math.isfinite(getattr(self, key)) or getattr(self, key) <= 0:
+                raise ValueError(f'{key} must be finite and positive')
+        if self.scps_diagnostics and self.private_selection == 'none':
+            raise ValueError('SCPS diagnostics require an active private selector')
         # Explicit names win; auto names distinguish runs and reduce collisions.
         if getattr(self, 'name', None) is None:
             stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -172,11 +187,17 @@ def get_config(parse=True, **optional_kwargs):
 
     # Train
     parser.add_argument('--name', type=str, default=None)
-    parser.add_argument('--variant', choices=('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps'),
+    parser.add_argument('--variant', choices=('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps', 'misa_scps_v2'),
                         default='default', help='Named training preset; default preserves existing objectives.')
     parser.add_argument('--private_selection', choices=('none', 'private_only', 'shared_context'), default=None)
     parser.add_argument('--scps_hidden', type=int, default=64)
     parser.add_argument('--scps_init_gate', type=float, default=0.9)
+    parser.add_argument('--scps_init_std', type=float, default=None,
+                        help='Gate final-layer weight std: SCPS=0.001, v2=0.01.')
+    parser.add_argument('--gate_lr_mult', type=float, default=None,
+                        help='Selector learning rate multiplier: SCPS=1, v2=3.')
+    parser.add_argument('--scps_diagnostics', type=str2bool, default=None,
+                        help='Fixed dev batch and training-gradient diagnostics; default on for v2.')
     parser.add_argument('--seed', type=int, default=336)
     parser.add_argument('--num_classes', type=int, default=0)
     parser.add_argument('--batch_size', type=int, default=128)

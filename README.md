@@ -1,3 +1,56 @@
+## MISA-SCPS-v2：门控优化与固定样本诊断
+
+`--variant misa_scps_v2` 默认只改变以下训练设置，结构与损失同 SCPS：
+
+| 设置 | misa_scps | misa_scps_v2 |
+| --- | --- | --- |
+| 门控末层权重 std | 0.001 | 0.01 |
+| selector 学习率倍率 | 1 | 3 |
+| 初始门控目标 | 0.9 | 0.9 |
+| 固定验证 batch / 梯度诊断 | 默认关闭 | 默认开启 |
+
+新增模块的参数组包括上下文 C、三个门控和其 LayerNorm；其余可训练参数在原学习率
+组，不重复计入。冻结规则不变，调度器对两组同倍率衰减。允许显式覆盖
+`--scps_init_std` / `--gate_lr_mult` / `--scps_diagnostics true|false`。
+
+项目根目录训练（同样可使用 torchrun，默认只由 rank 0 写诊断）：
+
+```bash
+python src/train.py --data mosei --variant misa_scps_v2 --seed 336
+```
+
+建议使用同一种子做四组，其他训练参数一致；旧版打开诊断不改变其初始化/学习率：
+
+```bash
+python src/train.py --data mosei --variant misa_scps --scps_diagnostics true --seed 336
+python src/train.py --data mosei --variant misa_scps --scps_init_std 0.01 --scps_diagnostics true --seed 336
+python src/train.py --data mosei --variant misa_scps --gate_lr_mult 3 --scps_diagnostics true --seed 336
+python src/train.py --data mosei --variant misa_scps_v2 --seed 336
+```
+
+默认运行名带时间避免覆盖；同时保留 config_<name>.json，评估仍为
+`python src/evaluate.py --name <运行名>`。V2 没有新增权重张量维度，SCPS 与 V2 的
+同结构模型权重兼容，但两组优化器状态不能当作旧单组状态续训；主实验从头训练。
+V2 无门控消融需同时 `--private_selection none --scps_diagnostics false`。
+
+在 checkpoint 目录保存：
+
+- `scps_fixed_dev_<name>.pt`：缓存的第一个验证 batch（含标签），固定排序，供复查。
+- `scps_diagnostics_<name>.jsonl`：第 0 轮（训练前）及每轮末的诊断。
+
+诊断每轮 eval/no_grad，恢复随机数和模型模式，不进行反向传播、不参与选模；
+不读取测试集。固定 batch 通常很小，仅定位机制，不代表整个验证集表现。
+门控统计包含 mean、相对第 0 轮同一样本的 mean/max_abs_change、偏离 0.9 的均值、
+逐维跨样本 sample_std；预测记录学得门控与固定 0.9 的 MAE 和逐样本预测差值。
+训练记录 context、每模态前层/末层/LayerNorm 的平均梯度 L2 范数（多卡梯度归约后、
+裁剪前）、有梯度/非零梯度步数，以及从本轮开始到本轮结束的参数绝对/相对更新。
+第 0 轮没有训练梯度，相关字段为零。门控变化包含输入表示变化，不能代替参数更新。
+每轮诊断针对该轮末权重，而非事后恢复的最佳 checkpoint。
+重复使用已有诊断运行名会拒绝覆盖，请选择新 --name。
+
+测试入口：`python -m unittest discover -s tests -p 'test_scps_v2.py' -v`。
+尚未验证完整数据性能，不把门控变化增大视为模型效果提升。
+
 ## MISA-SCPS：共享上下文条件化的私有选择（方案 B）
 
 `misa_scps` = **Shared-Context-conditioned Private Selection**。第一版用于检验融合前

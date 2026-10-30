@@ -162,7 +162,8 @@ class MISA(nn.Module):
         # Append new modules after legacy initialization to preserve old backbone RNG order.
         selection_mode = getattr(config, 'private_selection', 'none')
         self.private_selector = (PrivateSelection(config.hidden_size, config.scps_hidden,
-                                                 config.scps_init_gate, selection_mode)
+                                                 config.scps_init_gate, selection_mode,
+                                                 getattr(config, 'scps_init_std', 1e-3))
                                  if selection_mode != 'none' else None)
 
 

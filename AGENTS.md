@@ -18,7 +18,9 @@
 2026-10-30 用户反馈 PDR 无改善，现已授权方案 B：`--variant misa_scps`。
 SCPS 为共享上下文网络＋三个逐维私有门控，仅修改融合输入，原始表示仍用于重构
 和 DiffLoss；默认 CMD、SP=PP=0.3，不叠加 PDR/ATP/KL/RNC。
-当前先验证 SCPS，不能因历史 ATP-all 主线而擅自启用 ATP 或质心损失。
+用户进一步授权 SCPS-v2：`--variant misa_scps_v2`，末层 std=0.01，selector
+学习率倍率=3，初始门控仍 0.9；默认开启固定验证 batch 与训练梯度/参数诊断。
+旧 SCPS 保留原默认值；当前先验证 v2，不擅自启用 ATP 或质心损失。
 具体预设、权重覆盖和运行方式见 RESEARCH_CONTEXT.md / README.md。
 
 ## 跨对话一致性

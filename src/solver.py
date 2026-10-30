@@ -21,6 +21,7 @@ torch.cuda.manual_seed_all(123)
 
 from utils import to_gpu, time_desc_decorator, DiffLoss, MSE, SIMSE, CMD
 import models
+from scps_diagnostics import optimizer_groups, SCPSDiagnostics
 from shared_alignment import (
     shared_centroids, gather_centroids, centroid_uniformity, centroid_stats,
     gather_centroids_and_labels, sentiment_centroid_loss, sentiment_centroid_stats,
@@ -82,7 +83,8 @@ class Solver(object):
 
         if self.is_train:
             self.optimizer = self.train_config.optimizer(
-                filter(lambda p: p.requires_grad, self.model.parameters()),
+                optimizer_groups(self.model, self.train_config.learning_rate,
+                                 getattr(self.train_config, 'gate_lr_mult', 1.0)),
                 lr=self.train_config.learning_rate)
 
 
@@ -150,12 +152,23 @@ class Solver(object):
         best_valid_loss = float('inf')
         lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.5)
         
+        diagnostics = None
+        if (getattr(self.train_config, 'scps_diagnostics', False)
+                and (not distributed or torch.distributed.get_rank() == 0)):
+            diagnostics = SCPSDiagnostics(self.model, self.dev_data_loader,
+                                          self.checkpoint_dir, self.train_config.name)
+            diagnostics.report(0, self.optimizer)
+        if distributed:
+            torch.distributed.barrier()
+
         train_losses = []
         valid_losses = []
         for e in range(self.train_config.n_epoch):
             if hasattr(self.train_data_loader.sampler, 'set_epoch'):
                 self.train_data_loader.sampler.set_epoch(e)
             self.model.train()
+            if diagnostics is not None:
+                diagnostics.start_epoch()
 
             train_loss_cls, train_loss_sim, train_loss_diff = [], [], []
             train_loss_recon = []
@@ -252,6 +265,9 @@ class Solver(object):
                                 param.grad, op=torch.distributed.ReduceOp.SUM)
                             param.grad.div_(world_size)
 
+                if diagnostics is not None:
+                    diagnostics.observe_gradients()
+
                 torch.nn.utils.clip_grad_value_([param for param in self.model.parameters() if param.requires_grad], self.train_config.clip)
                 self.optimizer.step()
 
@@ -323,6 +339,9 @@ class Solver(object):
                     f"normalized_var_a={mean_stats[4]:.6e}, "
                     f"normalized_var_v={mean_stats[5]:.6e}"
                 )
+
+            if diagnostics is not None:
+                diagnostics.report(e + 1, self.optimizer)
 
             valid_loss, valid_acc = self.eval(mode="dev")
             

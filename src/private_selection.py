@@ -7,11 +7,12 @@ from torch import nn
 class PrivateSelection(nn.Module):
     modalities = ('t', 'a', 'v')
 
-    def __init__(self, dim, hidden_dim=64, init_gate=0.9, mode='shared_context'):
+    def __init__(self, dim, hidden_dim=64, init_gate=0.9, mode='shared_context', init_std=1e-3):
         super().__init__()
         if mode not in ('shared_context', 'private_only'):
             raise ValueError('Unknown private selection mode')
         self.mode = mode
+        self.override_gate = None  # Diagnostic forward override; not a learned parameter.
         self.context = (nn.Sequential(nn.Linear(3 * dim, dim), nn.ReLU())
                         if mode == 'shared_context' else None)
         self.norms = nn.ModuleDict({m: nn.LayerNorm(dim) for m in self.modalities})
@@ -21,7 +22,7 @@ class PrivateSelection(nn.Module):
             for m in self.modalities})
         for gate in self.gates.values():
             # Near-pass-through, but nonzero weights allow context gradients on step 1.
-            nn.init.normal_(gate[-1].weight, mean=0., std=1e-3)
+            nn.init.normal_(gate[-1].weight, mean=0., std=init_std)
             nn.init.constant_(gate[-1].bias, math.log(init_gate / (1 - init_gate)))
 
     def forward(self, shared, private):
@@ -34,5 +35,7 @@ class PrivateSelection(nn.Module):
             if context is not None:
                 inp = torch.cat((inp, context), -1)
             gates[m] = torch.sigmoid(self.gates[m](inp))
+            if self.override_gate is not None:
+                gates[m] = torch.full_like(gates[m], self.override_gate)
             selected[m] = gates[m] * private[m]
         return selected, gates
