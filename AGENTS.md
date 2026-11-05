@@ -21,6 +21,9 @@ SCPS 为共享上下文网络＋三个逐维私有门控，仅修改融合输入
 用户进一步授权 SCPS-v2：`--variant misa_scps_v2`，末层 std=0.01，selector
 学习率倍率=3，初始门控仍 0.9；默认开启固定验证 batch 与训练梯度/参数诊断。
 旧 SCPS 保留原默认值；当前先验证 v2，不擅自启用 ATP 或质心损失。
+2026-11-05 将原 `cmd_private_probe_v1` 改造为 `private_probe_v2`（统一输入掩码、
+`Linear(6d,64)→ReLU→Linear(64,1)`、训练集标准化、可由 config_<name>.json 还原架构、
+`--groups/--probe_seeds/--output_dir`），只用于冻结表示诊断，不改模型与训练流程。
 具体预设、权重覆盖和运行方式见 RESEARCH_CONTEXT.md / README.md。
 
 ## 跨对话一致性

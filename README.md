@@ -98,7 +98,9 @@ python src/evaluate.py --name <训练日志中的运行名>
 错误重建架构。旧无 config 的模型仍按原默认架构评估；无 config 的默认 SCPS
 权重可显式加 `--data mosei --variant misa_scps`（非默认架构需保留原配置）。
 SCPS 增加参数，不能严格加载旧 MISA 权重，也不支持自动忽略缺失参数。
-旧 `cmd_private_probe_v1` 限定原 CMD 架构，暂不支持 SCPS checkpoint。
+`private_probe_v2` 会优先读回 checkpoint 旁的 `config_<name>.json` 重建架构，因此
+同一入口可探针 CMD/PDR/SCPS 权重；若缺 config 则退回固定 CMD 默认，非默认架构会因
+严格加载失败而报错。
 
 验证：`python -m unittest discover -s tests -p 'test_private_selection.py' -v`。
 此版本尚未运行完整数据训练；不据门控数值或测试通过宣称效果。
@@ -162,72 +164,82 @@ Code for the [ACM MM 2020](https://2020.acmmm.org) paper [MISA: Modality-Invaria
 
 Research context for this fork: [研究方案与当前状态](RESEARCH_CONTEXT.md). AI assistants should first read [AGENTS.md](AGENTS.md).
 
-### CMD 私有信息诊断：`cmd_private_probe_v1`
+### 冻结特征私有信息诊断：`private_probe_v2`
 
-独立入口 `src/probe_private.py`，冻结已有 CMD 模型，缓存融合前的六个原始
-Sigmoid 表示，分别从头训练五组小预测头。只读取已有的 train/dev 数据缓存，
-不读取 test.pkl、不重建数据、不调用原 Solver 的训练或测试流程。
-原模型、主训练目标及默认配置保持不变。
+独立入口 `src/probe_private.py`（逻辑在 `src/probe_utils.py`），冻结已有模型，
+缓存融合前的六个原始 Sigmoid 表示，再用**统一结构 + 固定输入掩码**训练五组小预测头。
+只读取已有的 train/dev 数据缓存，不读取 test.pkl、不重建数据、不调用原 Solver 的
+训练或测试流程。原模型、主训练目标及默认配置保持不变。
 
-此版本固定为 **BERT + MISA，hidden_size=128、LSTM、ReLU、原模型 dropout=0.5**，
-适用于当前默认结构的 MOSI/MOSEI 回归 checkpoint。模型使用 `eval()` 且全部参数冻结。
-预测头为 `Linear(D, H) → ReLU → Linear(H, 1)`，不标准化、不加 dropout。
-共享输入始终拼接三个共享表示，不取质心。
+模型使用 `eval()` 且全部参数冻结；一次前向提取 `utt_shared_{t,a,v}` 与
+`utt_private_{t,a,v}`。共享输入始终拼接三个共享表示，不取质心，也不套用 ATP 的
+单位归一化——诊断的是模型实际学到的表示。
 
-| 组名 | 输入 | D | H | 参数量 |
-| --- | --- | ---: | ---: | ---: |
-| S | 共享 T/A/V | 384 | 128 | 49,409 |
-| S_T | 共享 T/A/V + 私有 T | 512 | 96 | 49,345 |
-| S_A | 共享 T/A/V + 私有 A | 512 | 96 | 49,345 |
-| S_V | 共享 T/A/V + 私有 V | 512 | 96 | 49,345 |
-| S_T_A_V | 全部共享和私有 | 768 | 64 | 49,281 |
+五组使用**同一输入布局** `[s_t, s_a, s_v, p_t, p_a, p_v]`（宽 `6d`）和**固定掩码**：
 
-固定预测头种子 `336,337,338,339,340`；Adam、学习率 `1e-3`、weight decay=0、
-batch size=64、最多 100 轮，验证 MSE 连续 10 轮未改善即停止，恢复验证 MSE
-最低的预测头后报告指标。五组相同种子的样本打乱顺序一致。
+| 组名 | 掩码 | 含义 |
+| --- | --- | --- |
+| `shared` | `[1,1,1,0,0,0]` | 只有共享信息（基线） |
+| `shared_pt` | `[1,1,1,1,0,0]` | 加文本私有 |
+| `shared_pa` | `[1,1,1,0,1,0]` | 加音频私有 |
+| `shared_pv` | `[1,1,1,0,0,1]` | 加视觉私有 |
+| `shared_all` | `[1,1,1,1,1,1]` | 加全部私有 |
+
+掩码在训练和验证期间一致，避免"训练时全输入、测试时突然置零"的输入变化。
+标准化只在**训练特征**上拟合均值/方差，再应用到验证集；顺序是先标准化、再套掩码。
+五组共用同一个小 MLP：`Linear(6d, 64) → ReLU → Linear(64, 1)`，相同初始化种子、
+样本打乱顺序、优化器和训练预算，每组独立训练。掩码维度的参数不接收梯度，因此
+**参数总量相同但有效容量不完全相等**，不能声称五组等价为同一函数类。
+
+固定预测头种子 `11,22,33`；Adam、学习率 `1e-3`、weight decay=0、batch size=64、
+最多 100 轮，验证 MSE 连续 10 轮未改善即停止，恢复验证 MSE 最低的预测头。
 训练损失为 MSE，验证误差按全部样本计算，不平均不同大小 batch 的均值。
-固定参数用于初筛，不代表已调优；v1 不提供更改预测头训练协议的 CLI 参数。
 
-从仓库根目录运行（先准备原始 CMD state_dict 和项目原有数据/BERT 环境）：
+从仓库根目录运行（先准备 state_dict 和项目原有数据/BERT 环境）：
 
 ```bash
 python src/probe_private.py \
-  --version cmd_private_probe_v1 \
-  --data mosi \
-  --checkpoint checkpoints/model_mosi_cmd_s336.std \
-  --output results/cmd_private_probe_v1/mosi_cmd_s336
+  --data mosei \
+  --checkpoint checkpoints/model_mosei_cmd_s336.std \
+  --groups shared shared_pt shared_pa shared_pv shared_all \
+  --probe_seeds 11 22 33 \
+  --output_dir results/private_probe/mosei_cmd_s336
 ```
 
-MOSEI 使用 `--data mosei` 并更换权重及输出目录。`--device auto` 默认有 CUDA 则使用
-CUDA，否则 CPU；可指定 `--device cpu` 或 `--device cuda`。单进程运行，不用 torchrun。
-特征提取 batch size 默认为 64，可通过 `--extract_batch_size` 调整显存占用。
-不传 `--output` 则创建带时间戳的新目录；已有目录会报错，防止覆盖结果。
+`--device auto` 默认有 CUDA 则使用 CUDA，否则 CPU；可指定 `--device cpu/cuda`。
+单进程运行，不用 torchrun。`--extract_batch_size`（默认 64）控制提取显存占用。
+不传 `--output_dir` 则创建带时间戳的新目录；已有目录会报错，防止覆盖结果。
+
+**架构读取：** 若 `model_<name>.std` 旁存在训练保存的 `config_<name>.json`，则读回
+`use_bert/use_cmd_sim/shared_align_loss/atp_variant/hidden_size/rnncell/dropout/
+variant/private_selection/scps_*/activation` 等架构字段（manifest 记录
+`architecture_source`）；否则退回固定 CMD 默认（BERT、hidden_size=128、LSTM、ReLU）。
+因此同一入口可连 CMD/PDR/SCPS 等 checkpoint，但需严格匹配原训练架构；state_dict
+不含历史损失来源，仍需自行核对训练记录。
 
 数据必须已存在于 `datasets/MOSI/` 或 `datasets/MOSEI/`：`train.pkl`、`dev.pkl`、
 `embedding_and_mapping.pt`。诊断读取沿用原始预处理和 collate，同时保存经过排序的
 样本 ID，保证特征、标签、预测一一对应。数据缓存须为可信的项目文件。
-加载权重使用严格参数匹配。旧权重仅包含 state_dict，无法据此验证训练时使用的是
-CMD 还是 ATP，需自行核对训练记录；脚本不会把指定 `cmd` 当作历史来源已验证。
-非默认架构或激活函数的权重不适用本固定版本（部分差异未必能通过形状检测）。
 
 输出包括：
 
-- `manifest.json`：固定协议、模型配置、checkpoint/数据/特征缓存 SHA-256、运行状态。
-- `features.pt`：train/dev 六组特征、标签、样本 ID 和提取元数据；每次新运行重新提取，
-  同一次运行的 25 个预测头复用该缓存，不自动复用历史缓存。
+- `manifest.json`：固定协议、模型配置、标准化方式、checkpoint/数据/特征缓存 SHA-256、状态。
+- `features.pt`：train/dev 六组特征、标签、样本 ID 和提取元数据；同一次运行的所有
+  预测头复用该缓存，不自动复用历史缓存。
 - `per_seed.csv`、`summary.csv`、`summary.json`：逐种子结果、均值及样本标准差。
 - 每组每种子的 `.pt` 最佳预测头、`_history.json` 训练曲线和 `_dev_predictions.csv`。
 
-`delta_mae_vs_S = MAE(S) - MAE(当前组)`，按相同种子配对，正值表示改善。
-MAE/MSE/Corr 使用全部验证样本；`acc2_nonzero`、`f1_nonzero` 排除标签 0 并用 `>0`
-二分；`acc2_with_zero`、`f1_with_zero` 保留标签 0 并用 `>=0` 二分。
-F1 使用真实标签在前的 weighted F1。常数预测/标签导致相关系数未定义或没有非零标签时，
-相应指标记为 JSON null / CSV 空白，汇总同时报告有效种子数，不能当作 0 分。
+`delta_mae_vs_shared = MAE(shared) - MAE(当前组)`，按相同种子配对，正值表示改善；
+`delta_corr_vs_shared` 为加入私有后的 Corr 减去 shared 的 Corr。
+MAE/MSE/Corr 使用全部验证样本；`acc3` 对预测与标签截断到 [−3,3] 后取整；
+`acc2_nonzero`/`f1_nonzero` 排除标签 0 并用 `>0` 二分；`acc2_with_zero`/`f1_with_zero`
+保留标签 0 并用 `>=0` 二分；F1 为真实标签在前的 weighted F1。常数预测/标签导致
+相关系数未定义或无有效样本时记 JSON null / CSV 空白，不能当作 0 分。
 
-这是固定 CMD 编码器上的探索性验证集诊断，衡量小预测头可读出的补充预测价值。
-参数量接近但隐藏宽度不同；多预测头种子不代表多编码器种子。
-验证集参与早停，结果不构成独立测试结论，也不能证明信息论独立或原 Transformer 的
-因果分支贡献。先做这五组；打乱私有样本对应关系等进一步对照尚未加入 v1。
+这是固定编码器上的探索性验证集诊断：衡量在固定预测头与训练条件下，加入私有特征
+是否提高验证集预测能力。它**不能**证明私有特征的信息论独立性或原融合模块的因果贡献，
+也不代表原模型编码器的稳定性。验证集参与早停，结果不构成独立测试结论；若写成正式
+结论，须固定方案后另做独立测试集评估。
 
 离线测试（无真实数据或 BERT 下载，开发验证环境为 PyTorch 2.4.1）：
 

@@ -179,7 +179,7 @@ L = L_task + diff_weight * L_diff + recon_weight * L_recon
 | 情感条件质心 KL | 已实现，默认关闭 |
 | 独立 ATP-all＋RNC，含 l2/l2sq | 2026-10-28 新增实现，默认关闭；未运行完整数据训练 |
 | 连续标签与质心的多卡聚合 | 已有实现与对应测试文件 |
-| CMD 冻结表示诊断 `cmd_private_probe_v1` | 已实现独立入口，五组近似等参数量预测头；尚未运行真实 checkpoint 诊断 |
+| 冻结表示诊断 `private_probe_v2` | 已实现独立入口：统一掩码预测头、训练集标准化、架构可由 config_<name>.json 还原；尚未运行真实 MOSEI checkpoint |
 | 质心替换三个共享 token 的融合结构 | 尚未采用 |
 | 私有特征残差纠错／新增私有 CU | 非当前确定方案 |
 | Omni 特征或教师蒸馏 | 仅讨论过，非当前实现目标 |
@@ -199,24 +199,36 @@ L = L_task + diff_weight * L_diff + recon_weight * L_recon
 5. 同时观察预测指标和表示诊断。ATP/CU/KL 下降不是性能提高或防止坍塌的充分证据。
 6. 私有分支价值先用冻结 CMD 表示、分别训练五组预测头的诊断检验，不从分支名称直接推断语义，也不只在测试时置零分支来认定贡献。
 
-### 6.1 已确认的便宜诊断：cmd_private_probe_v1（2026-10-29）
+### 6.1 冻结表示私有信息探针：private_probe_v2（2026-11-05 改造）
 
-用户确认先实现 CMD 私有信息诊断，checkpoint 后续补充；不改变 ATP-all 研究主线。
-入口 `src/probe_private.py`，固定默认 BERT/LSTM/ReLU、128 维 MISA。
+用户确认按“统一掩码 MLP＋特征缓存＋逐样本导出”方案改造原 `cmd_private_probe_v1`，
+脚本改为 `private_probe_v2`；不修改 models.py、train.py 或 Solver.train()。
+入口 `src/probe_private.py`，具体逻辑拆到 `src/probe_utils.py`。
 冻结完整模型并 eval，一次提取 train/dev 的原始共享／私有表示（Transformer 前），
-共享采用三向量拼接，不采用质心。五组为 S、S+T、S+A、S+V、S+T+A+V。
-各组独立训练一隐藏层 ReLU MLP，隐藏宽度 128/96/96/96/64，参数量约 4.93 万。
-固定种子 336–340；Adam、lr=1e-3、batch=64、最多 100 轮、patience=10，
-MSE 训练和验证选模；不加标准化、dropout、权重衰减或表示损失。
-使用原数据划分；诊断 loader 只读已存在的 train/dev 缓存，不读取测试集、不重建数据。
-独立保存特征、样本 ID、来源哈希、预测头、逐样本预测和种子配对的 MAE 改善量。
-Acc-2/F1 明确区分零标签口径，相关系数未定义时保存空值。
-旧 state_dict 无训练损失元数据，不能自动证明其 CMD 来源，需核对训练记录。
+共享采用三向量拼接，不取质心、不套 ATP 归一化。
 
-此诊断支持“固定编码器下小预测头能否读出私有分支的补充预测价值”的判断；
-不证明信息论独立、原融合模块的因果贡献或 ATP-all 方案收益。
-验证集参与选模，多预测头种子不替代多编码器种子；参数量匹配不等于函数类完全一致。
-打乱私有对应关系、固定宽度敏感性检查等仍为后续候选对照，未加入 v1。
+输入统一为 `[s_t, s_a, s_v, p_t, p_a, p_v]`（宽 6d），五组为固定掩码：
+`shared`=[1,1,1,0,0,0]、`shared_pt`、`shared_pa`、`shared_pv`、`shared_all`。
+掩码训练/验证一致；标准化仅在训练特征上拟合均值/方差再应用，先标准化后掩码。
+五组共用 `Linear(6d,64)→ReLU→Linear(64,1)`，相同初始化种子与样本顺序、Adam、
+lr=1e-3、batch=64、最多 100 轮、patience=10，验证 MSE 选模；`--probe_seeds` 默认 11/22/33。
+参数量相同但掩码维参数无梯度，有效容量不完全相等，需在报告中说明。
+
+CLI：`--data/--checkpoint/--groups/--probe_seeds/--output_dir/--device/--extract_batch_size`。
+若 checkpoint 旁存在 `config_<name>.json`，读回 use_bert/use_cmd_sim/shared_align_loss/
+atp_variant/hidden_size/rnncell/dropout/variant/private_selection/scps_*/activation
+等架构字段重建模型（manifest 记 `architecture_source`）；否则退回固定 CMD 默认。
+因此可探针 CMD/PDR/SCPS 权重，但必须与原训练架构严格匹配。
+
+使用原数据划分；诊断 loader 只读已存在的 train/dev 缓存，不读取测试集、不重建数据。
+输出 manifest、features.pt、per_seed/summary、每组每种子预测头/曲线/逐样本预测。
+`delta_mae_vs_shared`、`delta_corr_vs_shared` 按相同种子配对；Acc-2/F1 区分零标签口径，
+Acc-3 用截断取整；相关系数未定义时保存空值。
+
+此诊断回答“固定预测头与训练条件下，加入私有特征是否提高验证集预测能力”；
+不证明信息论独立、原融合模块的因果贡献或编码器种子稳定性。验证集参与选模，属探索性
+结果；写成正式结论前需固定方案并做独立测试集评估。
+打乱私有对应关系、固定宽度敏感性、重复共享特征对照等仍未加入 v2。
 
 评价关注 MAE、相关系数、Acc-2、F1 等；明确是否排除零标签，不能混合不同口径。
 多卡对照应核对有效 batch、采样器补齐、全局关系计算与梯度缩放。

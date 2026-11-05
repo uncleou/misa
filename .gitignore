@@ -132,6 +132,8 @@ dmypy.json
 datasets
 checkpoints/
 results/cmd_private_probe_v1/
+results/private_probe_v2/
+results/private_probe/
 runs/
 wandb/
 *.std
