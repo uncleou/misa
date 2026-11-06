@@ -21,7 +21,8 @@ def parse_args():
     parser.add_argument('--name', required=True,
                         help='Checkpoint name (checkpoints/model_<name>.std).')
     parser.add_argument('--shared_align_loss', choices=('cmd', 'atp'), default=None)
-    parser.add_argument('--variant', choices=('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps', 'misa_scps_v2'), default=None)
+    parser.add_argument('--variant', choices=('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps', 'misa_scps_v2', 'misa_hl'), default=None)
+    parser.add_argument('--prediction_head', choices=('scalar', 'distribution'), default=None)
     parser.add_argument('--private_selection', choices=('none', 'private_only', 'shared_context'), default=None)
     parser.add_argument('--scps_hidden', type=int, default=None)
     parser.add_argument('--output', default=None,
@@ -35,6 +36,7 @@ def build_eval_config(args, project_dir=PROJECT_DIR):
     saved = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
     fields = ('data', 'variant', 'private_selection', 'scps_hidden', 'scps_init_gate',
               'scps_init_std', 'gate_lr_mult', 'scps_diagnostics',
+              'prediction_head', 'hl_bins', 'hl_min', 'hl_max', 'hl_sigma', 'hl_reg_weight',
               'use_bert', 'use_cmd_sim', 'shared_align_loss', 'atp_variant',
               'hidden_size', 'embedding_size', 'rnncell', 'dropout', 'num_classes',
               'diff_weight', 'diff_sp_weight', 'diff_pp_weight', 'cu_weight',
@@ -46,7 +48,8 @@ def build_eval_config(args, project_dir=PROJECT_DIR):
         if not matches:
             raise ValueError(f'Unsupported saved activation: {value}')
         options['activation'] = matches[0]
-    for key in ('data', 'variant', 'shared_align_loss', 'private_selection', 'scps_hidden'):
+    for key in ('data', 'variant', 'shared_align_loss', 'private_selection', 'scps_hidden',
+                'prediction_head'):
         value = getattr(args, key, None)
         if value is not None:
             if key in options and options[key] != value:
@@ -92,6 +95,7 @@ def main():
         f'dataset: {config.data}\n'
         f'variant: {config.variant}\n'
         f'private_selection: {config.private_selection}\n'
+        f'prediction_head: {config.prediction_head}\n'
         f'shared_align_loss: {config.shared_align_loss}\n'
         f'eval_loss: {eval_loss:.6f}\n'
         f'accuracy: {accuracy:.6f}\n\n'

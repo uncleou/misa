@@ -1,3 +1,60 @@
+## MISA-HL：分布预测头（候选对照版本）
+
+`misa_hl` = **MISA with Histogram-Loss head**。这是便于实验的版本名，不是已确认的
+论文方法名，也不代表效果或首创性。它**只替换最后的单值预测头**，保留 MISA 的
+共享／私有表示、六 token Transformer 融合、重构与 DiffLoss，默认仍是 CMD、
+SP=PP=0.3，且不叠加 ATP/CU/KL/RNC。旧的标量版本与命令完全不变。
+
+```text
+文本/音频/视频 → 共享/私有表示 → 六表示 Transformer 融合 → 预测头
+  标量：Linear(hidden*3, 1)                    → 单值回归，MSE
+  分布：Linear(hidden*3, K) → softmax → 期望   → 连续分数，交叉熵
+```
+
+- 融合主干到 `fusion_layer_1 → dropout → activation` 的 `hidden*3` 特征保持不变，
+  分布头是一层 `Linear(hidden*3, K)`。分布模式**只使用并训练这个新头**：旧的标量
+  `fusion_layer_3` 仍被构造以保证不同预测头下骨干初始化/RNG 一致，但被冻结、
+  不参与前向与优化器。主实验**从零训练**，不做标量 checkpoint 迁移。
+- 输出 `K` 个有序分数位置 logits，`p = softmax(logits)`；连续预测为
+  `ŷ = Σ_k p_k c_k`，`c_k` 为分数位置。默认 `K=21`、位置 `-3.0 … 3.0`（步长 0.3）。
+- 目标分布使用 HL-Gauss 软标签：以真实标签为中心的 N(0, σ²) 落入各区间边界的
+  概率质量，再对每行归一化。边界由相邻位置中点给出并向两端各扩半个步长，
+  因此 `-3` 和 `3` 附近的高斯被截断、软标签期望会略向中间偏移；请单独检查极端
+  标签误差。`hl_sigma`（默认 0.3）是**输出分数分布宽度**，与衡量样本间标签邻域的
+  `sent_sigma` 是两个不同参数。
+- 训练损失默认用分布交叉熵替代原任务 MSE：
+  `L = L_HL + diff + sim*L_CMD + recon*L_recon`。`--hl_reg_weight` 可加一项
+  `λ|ŷ-y|`；默认 0 表示纯交叉熵，是否混合需单独对照。
+- 验证时先把分布转成连续值，再算整份验证集 **MAE**；分布版按 **MAE** 选模，
+  标量版仍按 MSE。这是两套协议，比较时不要混用选模规则。
+
+```bash
+# 独立对照：分布头（默认 CMD，从零训练）
+python src/train.py --data mosei --variant misa_hl --seed 336
+# 或显式开关（可在任意 CMD 版本上单独启用/关闭）
+python src/train.py --data mosei --prediction_head distribution --hl_sigma 0.15 --seed 336
+```
+
+参数：`--prediction_head scalar|distribution`、`--hl_bins`、`--hl_min/--hl_max`、
+`--hl_sigma`、`--hl_reg_weight`。评估自动从 `config_<name>.json` 读回预测头类型与分布参数：
+
+```bash
+python src/evaluate.py --name <运行名>
+```
+
+注意事项：
+
+- 分布期望被限制在 `[hl_min, hl_max]`，而原标量头无此限制；若分布版有效，建议补一个
+  “有界标量头＋MSE”对照，区分收益是否部分来自输出范围约束。
+- 分布模式的 checkpoint 与标量 checkpoint 结构不同（新增 `hl_projection`），不能
+  严格互载；主实验从零训练。旧的标量层虽保留但在分布模式下不参与训练，迁移不是
+  本版本的支持路径。
+- 训练集标签若超出 `[hl_min, hl_max]`，首轮会打印越界计数，软标签被压到边缘；
+  MOSEI/MOSI 情感标签通常在 `[-3,3]`，正式训练前仍应核对实际缓存范围。
+- 该版本尚未运行完整数据训练；不据实现或单元测试宣称效果。
+
+测试：`python -m unittest discover -s tests -p 'test_hl_head.py' -v`。
+
 ## MISA-SCPS-v2：门控优化与固定样本诊断
 
 `--variant misa_scps_v2` 默认只改变以下训练设置，结构与损失同 SCPS：

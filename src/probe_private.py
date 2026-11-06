@@ -27,7 +27,8 @@ ARCH_FIELDS = (
     'embedding_size', 'rnncell', 'dropout', 'num_classes', 'variant',
     'private_selection', 'scps_hidden', 'scps_init_gate', 'scps_init_std',
     'gate_lr_mult', 'scps_diagnostics', 'reverse_grad_weight', 'diff_weight',
-    'diff_sp_weight', 'diff_pp_weight')
+    'diff_sp_weight', 'diff_pp_weight', 'prediction_head', 'hl_bins',
+    'hl_min', 'hl_max', 'hl_sigma', 'hl_reg_weight')
 
 
 def sha256(path):

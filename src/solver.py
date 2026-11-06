@@ -21,6 +21,7 @@ torch.cuda.manual_seed_all(123)
 
 from utils import to_gpu, time_desc_decorator, DiffLoss, MSE, SIMSE, CMD
 import models
+import distribution
 from scps_diagnostics import optimizer_groups, SCPSDiagnostics
 from shared_alignment import (
     shared_centroids, gather_centroids, centroid_uniformity, centroid_stats,
@@ -41,6 +42,7 @@ class Solver(object):
         self.model = model
         self.parallel_model = model
         self.checkpoint_dir = Path(__file__).resolve().parent.parent / 'checkpoints'
+        self.distribution_head = getattr(train_config, 'prediction_head', 'scalar') == 'distribution'
     
     @time_desc_decorator('Build Graph')
     def build(self, cuda=True):
@@ -53,7 +55,7 @@ class Solver(object):
         # Final list
         for name, param in self.model.named_parameters():
 
-            # Bert freezing customizations 
+            # Bert freezing customizations
             if self.train_config.data == "mosei":
                 if "bertmodel.encoder.layer" in name:
                     layer_num = int(name.split("encoder.layer.")[-1].split(".")[0])
@@ -62,7 +64,12 @@ class Solver(object):
             elif self.train_config.data == "ur_funny":
                 if "bert" in name:
                     param.requires_grad = False
-            
+
+            # The distribution route trains only the new head; the legacy scalar
+            # output layer is unused and frozen so it never enters the optimizer.
+            if self.distribution_head and name.startswith('fusion.fusion_layer_3.'):
+                param.requires_grad = False
+
             if 'weight_hh' in name:
                 nn.init.orthogonal_(param)
             print('\t' + name, param.requires_grad)
@@ -149,6 +156,17 @@ class Solver(object):
               f"DiffLoss absolute weights: shared_private={diff_sp_weight:g}, "
               f"private_private={diff_pp_weight:g}")
 
+        if self.distribution_head:
+            centers = distribution.bin_centers(self.train_config)
+            print(
+                f"Prediction head: distribution (HL-Gauss); bins={self.train_config.hl_bins}, "
+                f"centers=[{centers[0].item():g}, {centers[-1].item():g}], "
+                f"sigma={self.train_config.hl_sigma:g}, reg_weight={self.train_config.hl_reg_weight:g}; "
+                f"model selection uses dev MAE"
+            )
+        else:
+            print("Prediction head: scalar regression; model selection uses dev MSE")
+
         best_valid_loss = float('inf')
         lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.5)
         
@@ -198,6 +216,8 @@ class Solver(object):
                 
                 if self.train_config.data == "ur_funny":
                     y = y.squeeze()
+                if self.distribution_head:
+                    y = y.reshape(-1)
 
                 if getattr(self.model, 'private_gates', None):
                     with torch.no_grad():
@@ -207,7 +227,18 @@ class Solver(object):
                             values.extend((gate.mean().item(), gate.std(dim=0, unbiased=False).mean().item()))
                         gate_stats.append(values)
 
-                cls_loss = criterion(y_tilde, y)
+                if self.distribution_head:
+                    cls_loss = distribution.hl_task_loss(y_tilde, y, self.train_config)
+                    if e == 0:
+                        count, low, high = distribution.outside_range(y, self.train_config)
+                        if count:
+                            print(
+                                f"WARNING: {count} training labels fall outside "
+                                f"[{self.train_config.hl_min:g}, {self.train_config.hl_max:g}] "
+                                f"(min={low:g}, max={high:g}); soft targets are edge-clipped."
+                            )
+                else:
+                    cls_loss = criterion(y_tilde, y)
                 # Equal weights retain the legacy route (including legacy callers).
                 if diff_sp_weight == diff_pp_weight:
                     diff_loss = self.get_diff_loss()
@@ -344,7 +375,7 @@ class Solver(object):
                 diagnostics.report(e + 1, self.optimizer)
 
             valid_loss, valid_acc = self.eval(mode="dev")
-            
+
             print(f"Current patience: {curr_patience}, current trial: {num_trials}.")
             if valid_loss <= best_valid_loss:
                 best_valid_loss = valid_loss
@@ -419,12 +450,16 @@ class Solver(object):
 
                 if self.train_config.data == "ur_funny":
                     y = y.squeeze()
-                
-                cls_loss = self.criterion(y_tilde, y)
-                loss = cls_loss
 
-                eval_loss.append(loss.item())
-                y_pred.append(y_tilde.detach().cpu().numpy())
+                if self.distribution_head:
+                    y = y.reshape(-1)
+                    y_scalar = distribution.expectation(y_tilde, self.train_config)
+                    eval_loss.append((y_scalar - y).abs().mean().item())
+                    y_pred.append(y_scalar.detach().cpu().numpy())
+                else:
+                    cls_loss = self.criterion(y_tilde, y)
+                    eval_loss.append(cls_loss.item())
+                    y_pred.append(y_tilde.detach().cpu().numpy())
                 y_true.append(y.detach().cpu().numpy())
 
         eval_loss = np.mean(eval_loss)

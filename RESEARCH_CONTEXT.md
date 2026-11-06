@@ -162,6 +162,34 @@ selector 组包含 C、三个门控与 LayerNorm，其余可训练参数为 back
 SCPS/v2 参数形状兼容，优化器分组不同；主实验从头训练。无需强迫门控分散。
 诊断改善不等于性能改善，固定小 batch 不代表全验证集。
 
+### 4.7 当前获准实验：MISA-HL 分布预测头（2026-11-06）
+
+用户要求新增一个**不影响旧版本、可用不同启动模式**的版本：保留 MISA 共享／私有
+表示与六 token 融合，只把最后的单值预测头换成分布预测头，再由分布期望得到连续值。
+先与 CMD 基线做对照，验证预测头本身；再考虑与 ATP_SENT 组合，形成 2×2 对照
+（CMD/scalar、CMD/HL、ATP+KL/scalar、ATP+KL/HL）。该思路迁移自分布价值回归
+（如 HL-Gauss），属方法尝试，不宣称首创；已有工作亦将标签分布学习用于 MSA。
+
+- 预设 `misa_hl`：默认 `prediction_head=distribution`，其余同 `default`（CMD、SP=PP=0.3，
+  不叠加 ATP/CU/KL/RNC）；也可用 `--prediction_head distribution` 在任意 CMD 版本单独开启。
+- 结构：融合主干到 `hidden*3` 激活特征不变，新增一层 `Linear(hidden*3, K)` 输出 K 个
+  logits；预测 `ŷ=Σ softmax(logits)_k c_k`，`c_k` 为分数位置。
+  **分布模式只使用并训练这个新头**：旧标量 `fusion_layer_3` 仍被构造以保持骨干
+  初始化/RNG 一致，但被冻结、不参与前向与优化器。用户确认主实验**从零训练**，
+  不做标量 checkpoint 迁移。
+- 目标：HL-Gauss 软标签（标签为中心的高斯落入区间边界的概率质量，每行归一化）；
+  训练用分布交叉熵替代任务 MSE。默认 K=21、位置 [-3,3]、σ=0.3；
+  `hl_sigma` 与 `sent_sigma` 是两个不同参数。
+- 选模与评价：分布版验证时先转连续值，按整份验证集 **MAE** 选模；标量版仍按 MSE。
+  汇总指标仍由转换后的连续预测计算 MAE/Corr/Acc-2 等，口径不变。
+- checkpoint：分布模式新增 `hl_projection`，与标量结构不能严格互载；主实验从零训练。
+- 需注意：分布期望被限制在 [hl_min,hl_max]，原标量头无此限制；若分布版有效，
+  应补“有界标量头＋MSE”对照。训练标签越界会在首轮告警并压到边缘。
+- 代码：`src/distribution.py`（软标签/期望/损失）、`src/models.py`（分布头）、
+  `src/solver.py`（任务损失、MAE 选模、旧标量层冻结）、`src/config.py`（参数与校验）、
+  `src/evaluate.py`/`src/probe_private.py`（读回预测头字段）。测试 `tests/test_hl_head.py`。
+- 状态：已实现并通过 CPU 单元测试；**未运行完整 MOSI/MOSEI 训练**，效果未验证。
+
 ## 5. 总目标与当前实现状态
 
 主线实验目标：
@@ -180,6 +208,7 @@ L = L_task + diff_weight * L_diff + recon_weight * L_recon
 | 独立 ATP-all＋RNC，含 l2/l2sq | 2026-10-28 新增实现，默认关闭；未运行完整数据训练 |
 | 连续标签与质心的多卡聚合 | 已有实现与对应测试文件 |
 | 冻结表示诊断 `private_probe_v2` | 已实现独立入口：统一掩码预测头、训练集标准化、架构可由 config_<name>.json 还原；尚未运行真实 MOSEI checkpoint |
+| HL 分布预测头（`misa_hl` / `--prediction_head distribution`） | 2026-11-06 新增实现，默认关闭；已通过 CPU 单元测试，未运行完整数据训练，效果未验证 |
 | 质心替换三个共享 token 的融合结构 | 尚未采用 |
 | 私有特征残差纠错／新增私有 CU | 非当前确定方案 |
 | Omni 特征或教师蒸馏 | 仅讨论过，非当前实现目标 |
@@ -285,6 +314,15 @@ private_only 消融、保存配置恢复与冲突拒绝、真实小型 MISA 一�
 门控参数更新。额外验证评估 --help 无需加载数据或联网。CPU 测试使用小型非 BERT
 MISA；既有测试含模拟 BERT。未运行完整 MOSI/MOSEI 训练或验证 GPU/NCCL，
 不据测试通过宣称效果。
+
+### 2026-11-06 MISA-HL 验证记录
+
+新增 7 项 HL 测试并运行全套 52 项测试（CPU，PyTorch 2.4.1），全部通过：
+预设/显式参数与非法配置、软标签归一化与峰位、期望值与单点极限、HL 损失有限性
+与梯度、分布头/标量头形状与状态键、分布模式下旧标量层被冻结且不进入优化器、
+真实小型 MISA 的分布训练与 MAE 选模及配置保存、从零训练只更新新分布头、
+评估配置读回预测头并拒绝冲突。未运行完整 MOSI/MOSEI 数据训练、未验证 GPU/NCCL
+或性能收益。
 
 ### 2026-10-30 SCPS-v2 验证记录
 

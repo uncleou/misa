@@ -165,6 +165,13 @@ class MISA(nn.Module):
                                                  config.scps_init_gate, selection_mode,
                                                  getattr(config, 'scps_init_std', 1e-3))
                                  if selection_mode != 'none' else None)
+        # Optional HL distribution head. The legacy scalar output layer is still
+        # constructed (so backbone init/RNG is identical across heads) but is
+        # never used in forward when the distribution head is active; the solver
+        # freezes it so training only updates the new distribution head.
+        self.prediction_head = getattr(config, 'prediction_head', 'scalar')
+        self.hl_projection = (nn.Linear(in_features=config.hidden_size*3, out_features=int(config.hl_bins))
+                              if self.prediction_head == 'distribution' else None)
 
 
         
@@ -264,6 +271,12 @@ class MISA(nn.Module):
                          self.utt_shared_t, self.utt_shared_v, self.utt_shared_a), dim=0)
         h = self.transformer_encoder(h)
         h = torch.cat((h[0], h[1], h[2], h[3], h[4], h[5]), dim=1)
+        if self.hl_projection is not None:
+            # Reuse the legacy trunk up to its activated features (hidden*3), then emit K logits.
+            fused = self.fusion[2](self.fusion[1](self.fusion[0](h)))
+            self.hl_features = fused
+            self.hl_logits = self.hl_projection(fused)
+            return self.hl_logits
         o = self.fusion(h)
         return o
     

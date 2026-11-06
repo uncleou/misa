@@ -88,13 +88,14 @@ class Config(object):
 
         # Named research presets: independent of model architecture/checkpoint keys.
         self.variant = getattr(self, 'variant', 'default')
-        if self.variant not in ('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps', 'misa_scps_v2'):
+        if self.variant not in ('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps', 'misa_scps_v2', 'misa_hl'):
             raise ValueError('Unknown training variant')
         self.diff_weight = getattr(self, 'diff_weight', 0.3)
         sp = getattr(self, 'diff_sp_weight', None)
         pp = getattr(self, 'diff_pp_weight', None)
         self.diff_sp_weight = self.diff_weight if sp is None else sp
-        ratio = {'default': 1.0, 'misa_pdr': 1.0 / 3.0, 'misa_pdr_zero': 0.0, 'misa_scps': 1.0, 'misa_scps_v2': 1.0}[self.variant]
+        ratio = {'default': 1.0, 'misa_pdr': 1.0 / 3.0, 'misa_pdr_zero': 0.0,
+                 'misa_scps': 1.0, 'misa_scps_v2': 1.0, 'misa_hl': 1.0}[self.variant]
         self.diff_pp_weight = self.diff_weight * ratio if pp is None else pp
         for key in ('diff_weight', 'diff_sp_weight', 'diff_pp_weight'):
             value = getattr(self, key)
@@ -138,6 +139,22 @@ class Config(object):
                 raise ValueError(f'{key} must be finite and positive')
         if self.scps_diagnostics and self.private_selection == 'none':
             raise ValueError('SCPS diagnostics require an active private selector')
+        # Optional distribution prediction head (HL-Gauss). Default scalar route is unchanged.
+        self.prediction_head = getattr(self, 'prediction_head', None)
+        if self.prediction_head is None:
+            self.prediction_head = 'distribution' if self.variant == 'misa_hl' else 'scalar'
+        if self.prediction_head not in ('scalar', 'distribution'):
+            raise ValueError("prediction_head must be 'scalar' or 'distribution'")
+        self.hl_bins = getattr(self, 'hl_bins', 21)
+        self.hl_min = getattr(self, 'hl_min', -3.0)
+        self.hl_max = getattr(self, 'hl_max', 3.0)
+        self.hl_sigma = getattr(self, 'hl_sigma', 0.3)
+        self.hl_reg_weight = getattr(self, 'hl_reg_weight', 0.0)
+        from distribution import validate_head_config
+        if self.prediction_head == 'distribution':
+            if self.data.lower() not in ('mosi', 'mosei'):
+                raise ValueError('Distribution head currently supports MOSI/MOSEI regression only')
+            validate_head_config(self)
         # Explicit names win; auto names distinguish runs and reduce collisions.
         if getattr(self, 'name', None) is None:
             stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -187,8 +204,21 @@ def get_config(parse=True, **optional_kwargs):
 
     # Train
     parser.add_argument('--name', type=str, default=None)
-    parser.add_argument('--variant', choices=('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps', 'misa_scps_v2'),
+    parser.add_argument('--variant', choices=('default', 'misa_pdr', 'misa_pdr_zero', 'misa_scps', 'misa_scps_v2', 'misa_hl'),
                         default='default', help='Named training preset; default preserves existing objectives.')
+    parser.add_argument('--prediction_head', choices=('scalar', 'distribution'), default=None,
+                        help="Task head: 'scalar' regression (existing) or 'distribution' HL head. "
+                             'Defaults to distribution for --variant misa_hl, else scalar.')
+    parser.add_argument('--hl_bins', type=int, default=21,
+                        help='Number of ordered score bins for the distribution head.')
+    parser.add_argument('--hl_min', type=float, default=-3.0,
+                        help='Lowest score bin centre (MOSI/MOSEI sentiment range).')
+    parser.add_argument('--hl_max', type=float, default=3.0,
+                        help='Highest score bin centre (MOSI/MOSEI sentiment range).')
+    parser.add_argument('--hl_sigma', type=float, default=0.3,
+                        help='Width of the Gaussian soft label; distinct from --sent_sigma.')
+    parser.add_argument('--hl_reg_weight', type=float, default=0.0,
+                        help='Optional L1 weight on the expected value; 0 keeps pure cross-entropy.')
     parser.add_argument('--private_selection', choices=('none', 'private_only', 'shared_context'), default=None)
     parser.add_argument('--scps_hidden', type=int, default=64)
     parser.add_argument('--scps_init_gate', type=float, default=0.9)
